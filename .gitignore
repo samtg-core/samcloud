@@ -1,0 +1,43 @@
+# Secrets (never commit)
+*.secret
+*.key
+secrets/
+*.env
+!*.env.example
+# samcloud caller credentials — bearer tokens + staging passwords live here (#145)
+.samcloud/
+
+# Local overrides
+*.local.yaml
+
+# OS
+.DS_Store
+
+# Editor
+*.swp
+*.swo
+*~
+
+# Temp
+tmp/
+
+# Node / Next.js
+node_modules/
+.next/
+.claude/*
+!.claude/skills/
+!.claude/hooks/
+!.claude/settings.json
+__pycache__
+*.alf
+.gitnexus
+
+# Deploy env files (secrets)
+deploy/.env.staging
+deploy/.env.production
+
+# Python virtualenvs (brokers run from on-disk .venv; never track it)
+.venv/
+
+# personal instructions for one checkout (an identity charter lives here, not in CLAUDE.md)
+CLAUDE.local.md

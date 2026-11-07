@@ -1,0 +1,17 @@
+FROM debian:bookworm-slim
+
+RUN apt-get update && \
+    apt-get install -y --no-install-recommends sslh && \
+    rm -rf /var/lib/apt/lists/*
+
+EXPOSE 443
+
+# Demux SSH vs TLS on :443
+# SSH → sshd container, TLS → caddy container
+# Docker DNS resolves service names within the controlplane network
+CMD ["sslh", \
+     "--foreground", \
+     "--listen", "0.0.0.0:443", \
+     "--ssh", "sshd:22", \
+     "--tls", "caddy:443", \
+     "--timeout", "2"]

@@ -1,0 +1,24 @@
+# Deploy-specific dockerignore — overrides root .dockerignore
+# Only exclude things we truly don't need in any container build
+**/.venv
+**/__pycache__
+**/.git
+**/node_modules
+**/.next
+*.md
+!registry/*.md
+.DS_Store
+*.swp
+*.key
+*.secret
+.scratch-*
+archive/
+docs/
+sandbox/
+staging/sim-network/
+staging/sim-device/
+agents/
+data/
+.gitnexus/
+.claude/
+console/test-results/

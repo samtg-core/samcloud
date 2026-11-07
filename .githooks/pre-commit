@@ -1,0 +1,105 @@
+#!/bin/bash
+## Pre-commit hook — blocks commit if tests or build fail
+## Install: git config core.hooksPath .githooks
+set -uo pipefail
+
+SAMCLOUD="$(git rev-parse --show-toplevel)"
+# Tests create temporary repositories. Git's hook-local environment otherwise
+# redirects their `git -C <temp>` commands into the committing worktree.
+while IFS= read -r git_local_var; do
+    unset "$git_local_var"
+done < <(git rev-parse --local-env-vars)
+VENV="$SAMCLOUD/registry/.venv/bin"
+
+RED='\033[0;31m'
+GREEN='\033[0;32m'
+NC='\033[0m'
+
+# Guard (2026-09-06, staging #93): a rail HOLDER must never commit to the
+# deployment checkout. A held instance once committed four times here and
+# auto-deployed to staging — park a patch on a ticket instead. The marker is
+# SAMCLOUD_HOLDER, which only the rail writes at birth (docs/Rail Clients.md).
+# Until 0.12.81 this keyed on SAMCLOUD_SESSION_ID, which an interactive session
+# on the samcloud channel also carries (sc-say stamps its writes with it), so
+# the admin's own release commit was refused on 2026-10-10 (#932's train).
+# Since 2026-11-07 (#1010) a holder may commit on a PR branch in a linked
+# worktree, so its work arrives as a PR. It is still refused in the primary
+# checkout (the deployment checkout is one), on main or staging, and on a
+# detached HEAD.
+if [ -n "${SAMCLOUD_HOLDER:-}" ]; then
+    git_dir=$(cd "$(git rev-parse --git-dir)" && pwd -P)
+    common_dir=$(cd "$(git rev-parse --git-common-dir)" && pwd -P)
+    branch=$(git symbolic-ref --short -q HEAD || true)
+    if [ "$git_dir" = "$common_dir" ] || [ -z "$branch" ] || [ "$branch" = main ] || [ "$branch" = staging ]; then
+        echo "pre-commit: refusing — this environment is a rail holder (SAMCLOUD_HOLDER set)." >&2
+        echo "            Holders commit only on a PR branch in a linked worktree, never in the" >&2
+        echo "            deployment checkout or on main/staging; otherwise attach a patch to a ticket." >&2
+        exit 1
+    fi
+fi
+
+echo "pre-commit: running gates..."
+
+# Gate 1: TypeScript
+echo -n "  tsc... "
+TSC_OUT=$(cd "$SAMCLOUD/console" && npx tsc --noEmit 2>&1); TSC_STATUS=$?
+# exit status is authoritative (codex, doc 260 §5: a missing interpreter or a
+# collection error used to walk through a grep for the failure word)
+if [ "$TSC_STATUS" -ne 0 ] || echo "$TSC_OUT" | grep -qiE "error TS"; then
+    echo -e "${RED}FAIL${NC}"
+    echo "$TSC_OUT" | grep -i "error" | head -5
+    exit 1
+fi
+echo -e "${GREEN}ok${NC}"
+
+# Gate 2: pytest
+echo -n "  pytest... "
+PYTEST_OUT=$(cd "$SAMCLOUD/registry" && "$VENV/python3" -m pytest test_registry.py test_ports.py test_conversation_provenance.py test_task_change_fields.py test_delivery_context.py test_auth_boundaries.py -q --tb=line 2>&1); PYTEST_STATUS=$?
+if [ "$PYTEST_STATUS" -ne 0 ] || echo "$PYTEST_OUT" | grep -q "failed"; then
+    echo -e "${RED}FAIL${NC}"
+    echo "$PYTEST_OUT" | tail -5
+    exit 1
+fi
+echo -e "${GREEN}ok${NC}"
+
+# Gate 3: sandbox harness
+echo -n "  sandbox... "
+SANDBOX_OUT=$(cd "$SAMCLOUD" && "$VENV/python3" sandbox/harness.py 2>&1) || true
+if ! echo "$SANDBOX_OUT" | grep -q "ALL PASSED"; then
+    echo -e "${RED}FAIL${NC}"
+    # Name the failing checks, not only the count: a 49/55 with no names can
+    # only be guessed at afterwards (0.12.47's first release commit, 2026-09-27).
+    echo "$SANDBOX_OUT" | grep -E "✗|FAIL|Error|Traceback" | head -20
+    echo "$SANDBOX_OUT" | tail -5
+    exit 1
+fi
+echo -e "${GREEN}ok${NC}"
+
+# Gate 4: sandbox feature tests (each prints "ALL PASSED")
+for t in test_shared_transport test_env_namespacing test_docs test_briefing test_tasks test_views test_wake test_native_charter test_rail_lifecycle test_native_stream_holder test_digest_receipt_regression test_listen_clocks test_listener_sibling_scan test_event_fields test_gateway_build test_hook_wake_sync test_post_merge_range test_deploy_hook test_rail_tail_on_wake_only test_adapter_status_context test_adapter_exit_status test_adapter_hermes_output test_conversation_provenance test_delivery_context test_broker_identity test_config_reference test_install_broker; do
+    echo -n "  sandbox:${t}... "
+    OUT=$(cd "$SAMCLOUD" && "$VENV/python3" "sandbox/${t}.py" 2>&1) || true
+    if ! echo "$OUT" | grep -q "ALL PASSED"; then
+        echo -e "${RED}FAIL${NC}"
+        echo "$OUT" | grep -E "✗|FAIL|Error|Traceback" | head -20
+        echo "$OUT" | tail -8
+        exit 1
+    fi
+    echo -e "${GREEN}ok${NC}"
+done
+
+# Gate 5: the private exporter's own check. The public tree carries neither the
+# exporter nor its manifest and baseline, so this runs only where they are.
+if [ -f "$SAMCLOUD/scripts/export-public.py" ]; then
+    echo -n "  sandbox:test_export_public... "
+    OUT=$(cd "$SAMCLOUD" && "$VENV/python3" sandbox/test_export_public.py 2>&1) || true
+    if ! echo "$OUT" | grep -q "ALL PASSED"; then
+        echo -e "${RED}FAIL${NC}"
+        echo "$OUT" | grep -E "✗|FAIL|Error|Traceback" | head -20
+        echo "$OUT" | tail -8
+        exit 1
+    fi
+    echo -e "${GREEN}ok${NC}"
+fi
+
+echo "pre-commit: all gates passed"

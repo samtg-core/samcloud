@@ -1,0 +1,381 @@
+#!/usr/bin/env python3
+"""
+samadb — drop-in adb front-end for the adb-broker (ticket #538, doc 148).
+
+The harness says "adb", the seat runs samadb: it transparently acquires or
+renews a device lease, queues with a visible position and a bounded wait,
+stages APKs so the broker can read them, forwards the command to the broker
+(which pins the serial, enforces guarded verbs, deadlines everything, and
+auto-backs-up displaced APKs), and exits with the remote exit code.
+
+Usage:
+    samadb [adb args...]                     # e.g. samadb install build.apk
+    samadb -s <serial|any> [adb args...]
+
+Every real adb verb passes through bit-compatibly (`devices` emits adb's
+own text format; `restore` is adb's restore). Shim-specific commands live
+under the `samadb:` namespace so no adb verb is ever shadowed:
+    samadb samadb:lease [--device D] [--ttl N] [--purpose STR] [--tag T]
+    samadb samadb:release | samadb:status | samadb:devices (JSON)
+    samadb samadb:backups [<package>]
+    samadb samadb:restore <package> [<versionName>]   # reinstall from backup
+    samadb samadb:logcat-start [logcat args...]  # streaming capture, lease-bound
+    samadb samadb:logcat-stop | samadb:captures  # keep the lease renewed while
+                                                 # capturing
+Bare aliases (lease, release, status, backups, captures, logcat-start,
+logcat-stop) still work — none of those are adb verbs.
+
+Env: SAMADB_URL (default http://127.0.0.1:7791), SAMADB_TOKEN_FILE
+     (default ~/.samcloud/token), SAMADB_WAIT_MAX (queue wait s, default 600),
+     SAMADB_TIMEOUT (exec deadline s, default broker default).
+Exit codes: remote adb exit; 75 queue wait exceeded; 77 refused by broker
+            (guarded verb / canonical id / not your lease); 124 deadline.
+"""
+
+import hashlib
+import json
+import os
+import shutil
+import sys
+import time
+import urllib.error
+import urllib.request
+from pathlib import Path
+
+URL = os.environ.get("SAMADB_URL", "http://127.0.0.1:7791").rstrip("/")
+TOKEN_FILE = Path(os.environ.get("SAMADB_TOKEN_FILE", str(Path.home() / ".samcloud/token")))
+WAIT_MAX = int(os.environ.get("SAMADB_WAIT_MAX", "600"))
+STATE = Path.home() / ".samadb" / "lease.json"
+STAGING = Path(os.environ.get("SAMADB_STAGING", "/Users/Shared/samadb-staging"))
+
+
+def die(msg, code=1):
+    print(f"samadb: {msg}", file=sys.stderr)
+    sys.exit(code)
+
+
+def token():
+    try:
+        return TOKEN_FILE.read_text().strip()
+    except OSError:
+        die(f"cannot read samcloud token at {TOKEN_FILE}")
+
+
+def api(method, path, body=None):
+    req = urllib.request.Request(
+        URL + path, method=method,
+        data=json.dumps(body).encode() if body is not None else None,
+        headers={"Authorization": f"Bearer {token()}", "Content-Type": "application/json"},
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=630) as r:
+            return r.status, json.loads(r.read() or b"{}")
+    except urllib.error.HTTPError as e:
+        try:
+            detail = json.loads(e.read()).get("detail", "")
+        except Exception:
+            detail = e.reason
+        return e.code, {"detail": detail}
+    except urllib.error.URLError as e:
+        die(f"broker unreachable at {URL} ({e.reason}) — is adb-broker running?", 69)
+
+
+def load_lease():
+    try:
+        return json.loads(STATE.read_text())
+    except Exception:
+        return None
+
+
+def save_lease(lease):
+    STATE.parent.mkdir(parents=True, exist_ok=True)
+    STATE.write_text(json.dumps(lease))
+    os.chmod(STATE, 0o600)
+
+
+def ensure_lease(device=None, ttl=0, purpose=None, tag=None, priority=False, canonical=False):
+    """Return a granted lease dict, reusing/renewing the cached one when live."""
+    cached = load_lease()
+    if cached:
+        code, r = api("POST", f"/leases/{cached['id']}/renew")
+        if code == 200 and r["lease"]["status"] == "granted":
+            if device in (None, "any", r["lease"]["serial"]):
+                return r["lease"]
+            api("DELETE", f"/leases/{cached['id']}")  # wrong device — swap
+        elif code == 200 and r["lease"]["status"] == "queued":
+            return wait_granted(r["lease"]["id"])
+    code, r = api("POST", "/leases", {
+        "device": device or "any", "ttl": ttl,
+        "purpose": purpose or f"samadb:{os.environ.get('USER', 'unknown')}",
+        "app_tag": tag, "priority": priority, "canonical": canonical,
+    })
+    if code != 200:
+        die(f"lease refused: {r.get('detail')}", 77)
+    lease = r["lease"]
+    save_lease(lease)
+    if lease["status"] == "granted":
+        # The hold is fine; the INVISIBLE hold is not (#538 c4175) — say so
+        # the moment a fresh lease is taken, with the way out.
+        print(f"samadb: lease {lease['id']} acquired on {lease['serial']} "
+              f"(ttl {lease['ttl']}s) — `samadb samadb:release` when done", file=sys.stderr)
+        return lease
+    return wait_granted(lease["id"], r.get("position"))
+
+
+def wait_granted(lease_id, position=None):
+    start = time.time()
+    last_note = 0
+    while time.time() - start < WAIT_MAX:
+        code, r = api("GET", f"/leases/{lease_id}")
+        if code != 200:
+            die(f"lease lost while queued: {r.get('detail')}", 77)
+        lease = r["lease"]
+        if lease["status"] == "granted":
+            save_lease(lease)
+            print(f"samadb: lease {lease['id']} acquired on {lease['serial']} "
+                  f"(ttl {lease['ttl']}s) — `samadb samadb:release` when done", file=sys.stderr)
+            return lease
+        if lease["status"] in ("expired", "released"):
+            die(f"lease {lease['status']} while queued", 77)
+        if time.time() - last_note >= 5:
+            print(f"samadb: queued for device (position {r.get('position')}, "
+                  f"waited {int(time.time() - start)}s / max {WAIT_MAX}s)", file=sys.stderr)
+            last_note = time.time()
+        time.sleep(3)
+    die(f"no device grant within {WAIT_MAX}s — queue is busy; "
+        f"raise SAMADB_WAIT_MAX or try later", 75)
+
+
+def stage_apk(path):
+    """Copy an APK the broker may not be able to read into the shared staging
+    dir, content-addressed so repeat installs dedupe."""
+    src = Path(path)
+    if not src.is_file():
+        die(f"no such APK: {src}")
+    digest = hashlib.sha256()
+    with src.open("rb") as f:
+        for chunk in iter(lambda: f.read(1 << 20), b""):
+            digest.update(chunk)
+    STAGING.mkdir(parents=True, exist_ok=True)
+    staged = STAGING / f"{digest.hexdigest()[:16]}_{src.name}"
+    if not staged.exists() or staged.stat().st_size != src.stat().st_size:
+        tmp = staged.with_suffix(".part")
+        shutil.copyfile(src, tmp)
+        os.chmod(tmp, 0o644)
+        os.replace(tmp, staged)
+    return str(staged)
+
+
+def run_exec(lease, argv, timeout=0, package=None, no_backup=False):
+    code, r = api("POST", "/exec", {
+        "lease_id": lease["id"], "argv": argv,
+        "timeout_s": timeout, "package": package, "no_backup": no_backup,
+    })
+    if code == 409 and "lease is" in str(r.get("detail", "")):
+        die(f"{r['detail']} — rerun to requeue", 77)
+    if code in (400, 403, 404, 503, 504):
+        die(f"{r.get('detail')}", 77 if code == 403 else 1)
+    if code != 200:
+        die(f"broker error {code}: {r.get('detail')}")
+    for w in r.get("warnings") or []:
+        print(f"samadb: warning: {w}", file=sys.stderr)
+    if r.get("backup"):
+        print(f"samadb: displaced APK backed up to {r['backup']}", file=sys.stderr)
+    sys.stdout.write(r.get("stdout", ""))
+    sys.stderr.write(r.get("stderr", ""))
+    if r.get("timed_out"):
+        print("samadb: deadline exceeded (exit 124)", file=sys.stderr)
+    return int(r.get("exit", 1))
+
+
+def format_adb_devices(devmap, long_form=False):
+    """Emit exactly what `adb devices [-l]` prints — harnesses parse this
+    (#538 c4165), so the shape is bit-compatible: header, serial<TAB>state
+    (or the -l long row), trailing blank line. Absent devices are omitted,
+    as real adb omits detached ones."""
+    lines = ["List of devices attached"]
+    for serial, d in devmap.items():
+        state = d.get("state")
+        if state in (None, "absent"):
+            continue
+        if long_form:
+            extra = f" model:{d['model']}" if d.get("model") else ""
+            lines.append(f"{serial}       {state}{extra}")
+        else:
+            lines.append(f"{serial}\t{state}")
+    lines.append("")
+    return "\n".join(lines)
+
+
+def flag_value(args, name):
+    if name in args:
+        i = args.index(name)
+        if i + 1 >= len(args):
+            die(f"{name} needs a value")
+        val = args[i + 1]
+        del args[i:i + 2]
+        return val
+    return None
+
+
+def main():
+    args = sys.argv[1:]
+    if not args or args[0] in ("-h", "--help", "help"):
+        print(__doc__)
+        return 0
+
+    # -s is only the device selector in adb's global position (before the
+    # verb); later ones are subcommand flags (e.g. install -s) — leave them.
+    device = flag_value(args, "-s") if args and args[0] == "-s" else None
+    timeout = int(flag_value(args, "--samadb-timeout") or 0)
+    package = flag_value(args, "--package")
+    no_backup = "--no-backup" in args and (args.remove("--no-backup") or True)
+
+    cmd = args[0] if args else ""
+
+    # Shim-specific commands are namespaced (samadb:X) so no adb verb is
+    # ever shadowed; bare aliases exist only for names adb doesn't use.
+    SHIM_SAFE = {"lease", "release", "status", "backups", "captures",
+                 "logcat-start", "logcat-stop", "recover"}
+    if cmd.startswith("samadb:"):
+        cmd = cmd[len("samadb:"):]
+        args[0] = cmd
+    elif cmd not in SHIM_SAFE:
+        # bit-compatible adb emulations that need no lease
+        if cmd == "devices":
+            _c, r = api("GET", "/devices")
+            print(format_adb_devices(r.get("devices", {}), "-l" in args))
+            return 0
+        if cmd == "version":
+            _c, r = api("GET", "/version")
+            sys.stdout.write(r.get("text", ""))
+            return int(r.get("exit", 0))
+        if cmd == "get-state":
+            path = "/device-state" + (f"?serial={device}" if device and device != "any" else "")
+            _c, r = api("GET", path)
+            sys.stdout.write(r.get("text", ""))
+            if r.get("error"):
+                print(r["error"], file=sys.stderr)
+            return int(r.get("exit", 0))
+        cmd = ""  # every other verb (restore included) passes through to adb
+
+    if cmd == "lease":
+        args = args[1:]
+        lease = ensure_lease(
+            device=flag_value(args, "--device") or device,
+            ttl=int(flag_value(args, "--ttl") or 0),
+            purpose=flag_value(args, "--purpose"),
+            tag=flag_value(args, "--tag"),
+            priority="--priority" in args,
+            canonical="--canonical" in args,
+        )
+        print(json.dumps(lease, indent=2))
+        return 0
+
+    if cmd == "release":
+        cached = load_lease()
+        if not cached:
+            print("samadb: no cached lease", file=sys.stderr)
+            return 0
+        api("DELETE", f"/leases/{cached['id']}")
+        STATE.unlink(missing_ok=True)
+        print("samadb: lease released", file=sys.stderr)
+        # the lease coordinates; humans still skim the DONE note (#538 c4208)
+        print("samadb: if this window produced results, post a DONE note "
+              "(what ran, what you found) on your arc ticket", file=sys.stderr)
+        return 0
+
+    if cmd == "status":
+        _c, health = api("GET", "/health")
+        cached = load_lease()
+        mine = None
+        if cached:
+            code, r = api("GET", f"/leases/{cached['id']}")
+            mine = r.get("lease") if code == 200 else None
+        print(json.dumps({"broker": health, "my_lease": mine}, indent=2))
+        return 0
+
+    if cmd == "devices":
+        _c, r = api("GET", "/devices")
+        print(json.dumps(r, indent=2))
+        return 0
+
+    if cmd == "backups":
+        pkg = args[1] if len(args) > 1 else None
+        _c, r = api("GET", "/backups" + (f"?package={pkg}" if pkg else ""))
+        print(json.dumps(r, indent=2))
+        return 0
+
+    if cmd == "restore":
+        if len(args) < 2:
+            die("restore <package> [<versionName>]")
+        pkg = args[1]
+        want = args[2] if len(args) > 2 else None
+        _c, r = api("GET", f"/backups?package={pkg}")
+        backups = r.get("backups", [])
+        if want:
+            backups = [b for b in backups if b.get("versionName") == want]
+        if not backups:
+            die(f"no backups for {pkg}" + (f" version {want}" if want else ""))
+        chosen = backups[-1]
+        apks = [str(Path(chosen["path"]) / a["apk"]) for a in chosen["apks"]]
+        lease = ensure_lease(device=device)
+        argv = ["install", "-r", apks[0]] if len(apks) == 1 else \
+               ["install-multiple", "-r"] + apks
+        print(f"samadb: restoring {pkg} {chosen['versionName']} from {chosen['path']}",
+              file=sys.stderr)
+        return run_exec(lease, argv, timeout=timeout, package=pkg)
+
+    if cmd == "recover":
+        reason = flag_value(args, "--reason") or "seat-requested recovery"
+        code, r = api("POST", "/server/recover", {"reason": reason})
+        if code == 200:
+            print(f"samadb: server {r['status']} (action: {r['action']})", file=sys.stderr)
+            return 0
+        die(f"recover: {r.get('detail')}", 77 if code == 409 else 1)
+
+    if cmd == "logcat-start":
+        lease_obj = ensure_lease(device=device)
+        code, r = api("POST", "/logcat/start",
+                      {"lease_id": lease_obj["id"], "argv": args[1:]})
+        if code != 200:
+            die(f"capture refused: {r.get('detail')}", 77)
+        cap = r["capture"]
+        print(f"samadb: capture {cap['id']} -> {cap['file']}", file=sys.stderr)
+        print(f"samadb: {r.get('note', '')}", file=sys.stderr)
+        print(cap["file"])
+        return 0
+
+    if cmd == "logcat-stop":
+        _c, r = api("GET", "/logcat")
+        me = [c for c in r.get("captures", []) if c["running"]]
+        cached = load_lease()
+        if cached:
+            mine = [c for c in me if c["lease"] == cached["id"]]
+            me = mine or me
+        if not me:
+            print("samadb: no running capture", file=sys.stderr)
+            return 0
+        code, r = api("POST", f"/logcat/{me[0]['id']}/stop")
+        if code != 200:
+            die(f"stop refused: {r.get('detail')}", 77)
+        cap = r["capture"]
+        print(f"samadb: capture {cap['id']} stopped, {cap['bytes']} bytes", file=sys.stderr)
+        print(cap["file"])
+        return 0
+
+    if cmd == "captures":
+        _c, r = api("GET", "/logcat")
+        print(json.dumps(r, indent=2))
+        return 0
+
+    # ---- passthrough adb command
+    if args and args[0] in ("install", "install-multiple"):
+        args = [stage_apk(a) if a.endswith(".apk") else a for a in args]
+
+    lease = ensure_lease(device=device)
+    return run_exec(lease, args, timeout=timeout, package=package, no_backup=no_backup)
+
+
+if __name__ == "__main__":
+    sys.exit(main())

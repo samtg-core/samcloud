@@ -1,0 +1,64 @@
+#!/bin/bash
+## Post-commit hook — deploys to staging on commits to staging branch
+set -uo pipefail
+
+SAMCLOUD="$(git rev-parse --show-toplevel)"
+BRANCH=$(git rev-parse --abbrev-ref HEAD)
+
+if [ "$BRANCH" != "staging" ]; then
+    exit 0
+fi
+
+RED='\033[0;31m'
+GREEN='\033[0;32m'
+YELLOW='\033[0;33m'
+NC='\033[0m'
+
+VERSION=$(git describe --tags --match 'v[0-9]*' --always 2>/dev/null)   # the nearest release, for the log line
+COMMIT=$(git rev-parse --short HEAD)
+
+echo ""
+echo -e "${YELLOW}post-commit: deploying to staging (v${VERSION}-${COMMIT})...${NC}"
+
+# Build images. Exit code is the source of truth (#107) — the old "grep
+# stdout for 'Built'" heuristic can't tell a genuinely-cached build apart
+# from one that errored out before producing any image, so it printed
+# "cached" and deployed the stale image either way.
+echo -n "  building... "
+BUILD_OUT=$(docker compose -f "$SAMCLOUD/deploy/docker-compose.yml" \
+    -p samcloud-stg \
+    --env-file "$SAMCLOUD/deploy/.env.staging" \
+    build 2>&1)
+BUILD_STATUS=$?
+
+if [ "$BUILD_STATUS" -ne 0 ]; then
+    echo -e "${RED}FAIL${NC}"
+    echo "$BUILD_OUT" | tail -20
+    echo -e "${RED}post-commit: build failed — staging NOT redeployed (still running the previous image)${NC}"
+    echo ""
+    exit 1
+fi
+echo -e "${GREEN}ok${NC}"
+
+# Restart staging
+# SURGICAL up (#312 tunnel drops, 2026-08-02): only recreate services whose
+# SOURCE changed in this commit (git-diff basis — image-ID comparison proved
+# unstable under cache-cold builds), --no-deps to break the depends_on
+# cascade (registry changes -> compose would recreate sshd/sslh too ->
+# staging tunnels + sim devices drop for nothing). Compose/env-only changes
+# need a manual `docker compose up -d`.
+. "$SAMCLOUD/.githooks/deploy-lib.sh"
+CHANGED=$(changed_services samcloud-stg "HEAD~1..HEAD")
+
+echo -n "  deploying (changed:${CHANGED:- none})... "
+if [ -n "$CHANGED" ]; then
+    docker compose -f "$SAMCLOUD/deploy/docker-compose.yml" \
+        -p samcloud-stg \
+        --env-file "$SAMCLOUD/deploy/.env.staging" \
+        --profile sim \
+        up -d --no-build --no-deps $CHANGED 2>/dev/null
+fi
+echo -e "${GREEN}ok${NC}"
+
+echo -e "${GREEN}post-commit: staging deployed (v${VERSION}-${COMMIT})${NC}"
+echo ""

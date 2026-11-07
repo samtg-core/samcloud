@@ -1,0 +1,16 @@
+[Unit]
+Description=samcloud zero-touch deploy: merged PR into main -> post-merge (ticket 960)
+After=network-online.target docker.service
+Wants=network-online.target
+
+[Service]
+User=__USER__
+WorkingDirectory=__REPO_DIR__
+# Installed copy, not the checkout: a deploy never rewrites the running receiver.
+EnvironmentFile=__HOME__/.config/samcloud/deploy-hook.env
+ExecStart=/usr/bin/python3 __HOME__/.local/samcloud/deploy-hook/receiver.py
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target

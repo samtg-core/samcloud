@@ -1,0 +1,191 @@
+#!/bin/bash
+## Post-merge hook — a merge into main is a release (0.12.96)
+## Triggered by: the deploy receiver's fast-forward of main (or a git pull on main)
+##
+## Assigns the version from this host's release tags (next_version, deploy-lib.sh),
+## builds the images as that version, recreates the services whose source changed
+## since the previous release, then tags. Nobody raises a version by hand. The last
+## line it prints is a contract the receiver reads: post-merge: result=… version=…
+set -uo pipefail
+
+SAMCLOUD="$(git rev-parse --show-toplevel)"
+BRANCH=$(git rev-parse --abbrev-ref HEAD)
+
+RED='\033[0;31m'
+GREEN='\033[0;32m'
+YELLOW='\033[0;33m'
+CYAN='\033[0;36m'
+NC='\033[0m'
+
+## Also deploy staging on merges into staging branch — surgical, same as
+## everywhere else (this section was missed in the first git-diff pass and
+## full-bounced the staging stack on a console-only merge, 2026-08-02).
+if [ "$BRANCH" = "staging" ]; then
+    VERSION=$(git describe --tags --match 'v[0-9]*' --always 2>/dev/null)   # the nearest release, for the log line
+    COMMIT=$(git rev-parse --short HEAD)
+    export GIT_COMMIT="$COMMIT"        # baked into the registry image: GET /api/v1/ names it
+    echo ""
+    echo -e "${YELLOW}post-merge: deploying to staging (${VERSION}-${COMMIT})...${NC}"
+    echo -n "  building... "
+    BUILD_OUT=$(docker compose -f "$SAMCLOUD/deploy/docker-compose.yml" \
+        -p samcloud-stg \
+        --env-file "$SAMCLOUD/deploy/.env.staging" \
+        build 2>&1)
+    BUILD_STATUS=$?
+    if [ "$BUILD_STATUS" -ne 0 ]; then
+        echo -e "${RED}FAIL${NC}"
+        echo "$BUILD_OUT" | tail -20
+        echo -e "${RED}post-merge: build failed — staging NOT redeployed (still running the previous image)${NC}"
+        echo ""
+        exit 1
+    fi
+    echo -e "${GREEN}ok${NC}"
+    . "$SAMCLOUD/.githooks/deploy-lib.sh"
+    CHANGED=$(changed_services samcloud-stg "HEAD@{1}..HEAD")
+    echo -n "  deploying (changed:${CHANGED:- none})... "
+    if [ -n "$CHANGED" ]; then
+        docker compose -f "$SAMCLOUD/deploy/docker-compose.yml" \
+            -p samcloud-stg \
+            --env-file "$SAMCLOUD/deploy/.env.staging" \
+            --profile sim \
+            up -d --no-build --no-deps $CHANGED 2>/dev/null
+    fi
+    echo -e "${GREEN}post-merge: staging deployed (${VERSION}-${COMMIT})${NC}"
+    echo ""
+    exit 0
+fi
+
+if [ "$BRANCH" != "main" ]; then
+    exit 0
+fi
+
+. "$SAMCLOUD/.githooks/deploy-lib.sh"
+
+# The version is assigned here, from this host's release tags: the previous
+# release's patch plus one, or the head's own tag when it already has one.
+VERSION=$(next_version HEAD)
+COMMIT=$(git rev-parse --short HEAD)
+# Both baked into the registry image: GET /api/v1/ names the release and its commit.
+export GIT_COMMIT="$COMMIT"
+export SAMCLOUD_VERSION="$VERSION"
+
+# The deploy target is host config, not repo content: ~/.config/samcloud/deploy.env
+# may set PROD_PROJECT / PROD_ENV_FILE / STG_PROJECT / STG_ENV_FILE. Defaults are
+# the reference deployment's. Staging is skipped when its env file is absent (a host with one stack).
+DEPLOY_CONF="${SAMCLOUD_DEPLOY_CONF:-$HOME/.config/samcloud/deploy.env}"
+[ -f "$DEPLOY_CONF" ] && . "$DEPLOY_CONF"
+if [ "${DEPLOY_DISABLED:-0}" = 1 ]; then
+    echo -e "${YELLOW}post-merge: this host is not the deploy host ($DEPLOY_CONF) — v${VERSION} not deployed here${NC}"
+    exit 0
+fi
+PROD_PROJECT="${PROD_PROJECT:-samcloud-prod}"
+PROD_ENV_FILE="${PROD_ENV_FILE:-$SAMCLOUD/deploy/.env.production}"
+STG_PROJECT="${STG_PROJECT-samcloud-stg}"
+STG_ENV_FILE="${STG_ENV_FILE:-$SAMCLOUD/deploy/.env.staging}"
+STAGING=1
+{ [ -z "$STG_PROJECT" ] || [ ! -f "$STG_ENV_FILE" ]; } && STAGING=0
+
+# Diff from the last release, not the last main (see release_base).
+BASE=$(release_base "HEAD@{1}")
+PRS=$(merged_prs "${BASE}..HEAD")
+PRS_CSV=$(echo "$PRS" | tr ' ' ',')
+RELEASE_LOG="${SAMCLOUD_RELEASE_LOG:-$HOME/logs/samcloud-releases.log}"
+
+# The last line of this hook is a contract: the receiver reads it to report the
+# release on the pull request, and the host ledger keeps it. A failure is never
+# worded as a release.
+finish() {
+    mkdir -p "$(dirname "$RELEASE_LOG")" 2>/dev/null
+    echo "$(date -u +%Y-%m-%dT%H:%M:%SZ) v${VERSION} ${COMMIT} result=$1 prs=${PRS_CSV:-none} merger=${DEPLOY_MERGER:-local}" >> "$RELEASE_LOG" 2>/dev/null
+    echo "post-merge: result=$1 version=${VERSION} commit=${COMMIT} prs=${PRS_CSV:-none}"
+}
+
+if git describe --tags --exact-match --match 'v[0-9]*' HEAD >/dev/null 2>&1; then
+    echo -e "${YELLOW}post-merge: HEAD is already release v${VERSION} — nothing to deploy${NC}"
+    finish already-released
+    exit 0
+fi
+
+echo ""
+echo -e "${CYAN}=========================================${NC}"
+echo -e "  ${CYAN}samcloud release v${VERSION}${NC} (${COMMIT}) to ${PROD_PROJECT}: ${PRS:-no pull request in range}, since ${BASE}"
+echo -e "${CYAN}=========================================${NC}"
+echo ""
+
+# Build images, as this version
+echo -n "  building... "
+BUILD_OUT=$(docker compose -f "$SAMCLOUD/deploy/docker-compose.yml" \
+    -p "$PROD_PROJECT" \
+    --env-file "$PROD_ENV_FILE" \
+    build 2>&1)
+BUILD_STATUS=$?
+
+if [ "$BUILD_STATUS" -ne 0 ]; then
+    echo -e "${RED}FAIL${NC}"
+    echo "$BUILD_OUT" | tail -20
+    echo -e "${RED}post-merge: build failed — production NOT deployed (still running the previous image)${NC}"
+    finish build-failed
+    exit 1
+fi
+echo -e "${GREEN}ok${NC}"
+
+# Tag for staging reuse
+if [ "$STAGING" = 1 ]; then
+    for svc in registry console caddy sshd sslh; do
+        docker tag "${PROD_PROJECT}-${svc}:latest" "${STG_PROJECT}-${svc}:latest" 2>/dev/null
+    done
+fi
+
+# Restart production — SURGICAL (#312 tunnel drops, 2026-08-02): only `up`
+# services whose SOURCE changed since the last release (git-diff basis — the
+# image-ID comparison proved unstable under cache-cold builds and bounced
+# everything anyway), with --no-deps to break the depends_on
+# recreate-cascade. Without this, every release recreates registry ->
+# compose cascades to sshd/sslh (unchanged!) -> every reverse tunnel in the
+# fleet drops. Trade-off: a compose-yml/env-only change no longer
+# auto-recreates its service — run `docker compose up -d` by hand for those.
+PROD_CHANGED=$(changed_services "$PROD_PROJECT" "${BASE}..HEAD")
+echo -n "  deploying ${PROD_PROJECT} (changed:${PROD_CHANGED:- none})... "
+if [ -n "$PROD_CHANGED" ]; then
+    docker compose -f "$SAMCLOUD/deploy/docker-compose.yml" \
+        -p "$PROD_PROJECT" \
+        --env-file "$PROD_ENV_FILE" \
+        up -d --no-build --no-deps $PROD_CHANGED 2>/dev/null
+fi
+echo -e "${GREEN}ok${NC}"
+
+if [ "$STAGING" = 1 ]; then
+    STG_CHANGED=$(changed_services "$STG_PROJECT" "${BASE}..HEAD")
+    echo -n "  deploying ${STG_PROJECT} (changed:${STG_CHANGED:- none})... "
+    if [ -n "$STG_CHANGED" ]; then
+        docker compose -f "$SAMCLOUD/deploy/docker-compose.yml" \
+            -p "$STG_PROJECT" \
+            --env-file "$STG_ENV_FILE" \
+            --profile sim \
+            up -d --no-build --no-deps $STG_CHANGED 2>/dev/null
+    fi
+    echo -e "${GREEN}ok${NC}"
+fi
+
+# Tag last. The tag says this release ran, and it is the next release's range base
+# (release_base): a build that failed leaves HEAD untagged, so its changes stay in
+# the next range and their services are recreated then.
+if git tag -l "v${VERSION}" | grep -q "v${VERSION}"; then
+    echo -e "${YELLOW}  tag v${VERSION} already exists on another commit — the next range starts there${NC}"
+else
+    # A failed tag is said out loud: an untagged release widens the next deploy's
+    # range, it does not break it.
+    if git tag -a "v${VERSION}" -m "Release v${VERSION}
+
+PRs: ${PRS:-none}
+merged by: ${DEPLOY_MERGER:-local}" 2>/dev/null; then
+        echo -e "${GREEN}  ✓ tagged v${VERSION}${NC}"
+    else
+        echo -e "${RED}  ✗ could not tag v${VERSION} (git identity?) — deployed anyway; tag it by hand${NC}"
+    fi
+fi
+
+echo ""
+echo -e "${GREEN}  v${VERSION} deployed to ${PROD_PROJECT}$([ "$STAGING" = 1 ] && echo " + ${STG_PROJECT}")${NC}"
+echo ""
+finish ok

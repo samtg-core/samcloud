@@ -1,0 +1,31 @@
+FROM node:22-slim AS builder
+
+WORKDIR /app
+
+# Dependencies
+COPY console/package.json console/package-lock.json ./
+RUN npm ci
+
+# Source
+COPY console/ .
+
+# Build-time registry URL for server components
+ARG REGISTRY_URL=http://registry:7777
+ENV REGISTRY_URL=${REGISTRY_URL}
+
+RUN npm run build
+
+# --- Production ---
+FROM node:22-slim
+
+WORKDIR /app
+
+COPY --from=builder /app/.next .next
+COPY --from=builder /app/node_modules node_modules
+COPY --from=builder /app/package.json .
+COPY --from=builder /app/next.config.ts .
+COPY --from=builder /app/public public
+
+EXPOSE 3000
+
+CMD ["node", "node_modules/next/dist/bin/next", "start", "--hostname", "0.0.0.0", "--port", "3000"]

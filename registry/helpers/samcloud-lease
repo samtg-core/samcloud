@@ -1,0 +1,213 @@
+#!/usr/bin/env bash
+# LEASE_VERSION: 1.2.0
+# Served as GET /api/v1/helpers/lease. Install from the plane you lease on:
+#   curl -s -H @"$HOME/.samcloud/__TOKEN_HDR__" __API__/helpers/lease > ~/.local/bin/sc-lease && chmod +x ~/.local/bin/sc-lease
+# sc-lease — the compute queue client. Acquire a lease on a registered resource
+# and block until it is granted, hold it while the work runs, release it after
+# the work's processes have exited. A Unity job, a model load and a splat
+# transform all queue against the same host in one order through this.
+#
+#   sc-lease acquire <resource> [--memory MB] [--exclusive] [--ttl S] [--max-total S]
+#                    [--wait [S]] [--service ID] [--priority low|normal|high|critical]
+#                                            --wait with no number waits with no deadline
+#                    [--state FILE]          prints the lease id; exit 0 granted,
+#                                            3 wait ran out, 4 refused (detail on stderr)
+#   sc-lease hold <lease_id> [--ttl S] [--every S]   renew until the lease is gone (run with &)
+#   sc-lease release <lease_id> [--after-pids "PID …"] [--timeout S]
+#                                            wait for the pids to exit (bounded), then release
+#   sc-lease status <lease_id>               the row, with its queue position while it waits
+#   sc-lease queue <resource>                who waits, in grant order
+#
+#   --state FILE  acquire writes LEASE_ID=… there (0600) for the completed hook to read.
+#
+# Where it writes: --plane NAME (a plane the serving plane names) > $SAMCLOUD_API > API= in ~/.config/samcloud/wake.env
+#                  > the plane this copy was served from.
+# Auth — a 0600 header file, never the bearer on a command line (#582):
+#   --hdr FILE > $SAMCLOUD_AUTH_HDR > ~/.samcloud/token.hdr > raw ~/.samcloud/token (curl --config on its own fd)
+#
+# bash 3.2 compatible (stock macOS). Requires: curl, python3.
+set -u
+
+prog=${0##*/}
+die() { printf '%s: %s\n' "$prog" "$1" >&2; exit "${2:-1}"; }
+
+# Are these pids alive? Prints "gone", "alive <pids>" or "unknown" (ps itself failed —
+# an observation that could not be made is not an absence). kill -0 is not used: it
+# says "no" for a live process this user may not signal.
+observe_pids() {
+  local all live="" p
+  all=$(ps -axo pid= 2>/dev/null) || { echo unknown; return 0; }
+  [ -n "$all" ] || { echo unknown; return 0; }
+  for p in "$@"; do printf '%s\n' "$all" | grep -qE "^ *$p\$" && live="$live $p"; done
+  [ -z "$live" ] && echo gone || echo "alive$live"
+}
+
+cmd="${1:-}"; [ $# -gt 0 ] && shift
+case "$cmd" in
+  acquire|hold|release|status|queue) ;;
+  -h|--help|"") sed -n '2,28p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
+  *) die "unknown command '$cmd' (try --help)" 2 ;;
+esac
+target="${1:-}"; [ -n "$target" ] || die "usage: $prog $cmd <resource|lease_id> [options]" 2
+shift
+
+memory=""; exclusive=0; ttl=""; maxtotal=""; wait_s=""; wait_flag=0; service=""; priority=""
+state=""; every=""; pids=""; timeout=""; plane=""; hdr=""
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --memory)     memory="${2:-}"; shift 2 || die "missing value after --memory" 2 ;;
+    --exclusive)  exclusive=1; shift ;;
+    --ttl)        ttl="${2:-}"; shift 2 || die "missing value after --ttl" 2 ;;
+    --max-total)  maxtotal="${2:-}"; shift 2 || die "missing value after --max-total" 2 ;;
+    --wait)       # a number is a deadline; none is a wait with no deadline (wait: true)
+                  case "${2:-}" in ""|-*) wait_flag=1; shift ;; *) wait_s="$2"; shift 2 ;; esac ;;
+    --service)    service="${2:-}"; shift 2 || die "missing value after --service" 2 ;;
+    --priority)   priority="${2:-}"; shift 2 || die "missing value after --priority" 2 ;;
+    --state)      state="${2:-}"; shift 2 || die "missing path after --state" 2 ;;
+    --every)      every="${2:-}"; shift 2 || die "missing value after --every" 2 ;;
+    --after-pids) pids="${2:-}"; shift 2 || die "missing pids after --after-pids" 2 ;;
+    --timeout)    timeout="${2:-}"; shift 2 || die "missing value after --timeout" 2 ;;
+    --plane)      plane="${2:-}"; shift 2 || die "missing value after --plane" 2 ;;
+    --hdr)        hdr="${2:-}"; shift 2 || die "missing path after --hdr" 2 ;;
+    *) die "unknown argument '$1' (try --help)" 2 ;;
+  esac
+done
+for v in "$memory" "$ttl" "$maxtotal" "$wait_s" "$every" "$timeout"; do
+  case "$v" in ""|*[0-9]*) ;; esac
+  case "$v" in *[!0-9]*) die "numbers only: '$v'" 2 ;; esac
+done
+
+# The seat's plane (as sc-say resolves it).
+tokf="${SAMCLOUD_TOKEN_FILE:-$HOME/.samcloud/token}"
+served_api="__API__"
+[ "$served_api" = "__"API"__" ] && served_api=""
+seat_api=$(grep -m1 '^API=' "$HOME/.config/samcloud/wake.env" 2>/dev/null | cut -d= -f2- | tr -d '"')
+case "$plane" in
+  # __PLANE_PRESETS__
+  "")   api="${SAMCLOUD_API:-${seat_api:-$served_api}}" ;;
+  *) die "--plane must be __PLANE_NAMES__, got '$plane'" 2 ;;
+esac
+api=${api%/}
+[ -n "$api" ] || die "no API: this copy was not served by a registry and the seat has no wake.env" 2
+case "$api" in */api/v1) ;; *) api="$api/api/v1" ;; esac
+
+authhdr=""
+if [ -n "$hdr" ]; then
+  [ -r "$hdr" ] || die "header file not readable: $hdr"; authhdr="$hdr"
+elif [ -n "${SAMCLOUD_AUTH_HDR:-}" ]; then
+  [ -r "$SAMCLOUD_AUTH_HDR" ] || die "SAMCLOUD_AUTH_HDR not readable: $SAMCLOUD_AUTH_HDR"; authhdr="$SAMCLOUD_AUTH_HDR"
+elif [ -r "${tokf}.hdr" ]; then
+  authhdr="${tokf}.hdr"
+fi
+[ -n "$authhdr" ] || [ -r "$tokf" ] || die "no auth: no header file at ${tokf}.hdr and no token at $tokf" 2
+
+# call METHOD PATH [JSON] -> sets code, resp. Bearer never in argv.
+call() {
+  local method="$1" path="$2" data="${3:-}" out
+  if [ -n "$authhdr" ]; then
+    out=$(curl -sS -H @"$authhdr" -X "$method" "$api$path" -H 'Content-Type: application/json' \
+            -w '\n%{http_code}' ${data:+--data-binary @-} <<<"$data" 2>&1) || die "curl failed: $out" 5
+  else
+    out=$(curl -sS --config <(printf 'header = "Authorization: Bearer %s"\n' "$(cat "$tokf")") \
+            -X "$method" "$api$path" -H 'Content-Type: application/json' \
+            -w '\n%{http_code}' ${data:+--data-binary @-} <<<"$data" 2>&1) || die "curl failed: $out" 5
+  fi
+  code=$(printf '%s' "$out" | tail -n1)
+  resp=$(printf '%s' "$out" | sed '$d')
+}
+field() { RESP="$resp" python3 -c 'import json,os,sys
+try: d=json.loads(os.environ["RESP"])
+except Exception: sys.exit(0)
+v=d
+for k in sys.argv[1:]:
+    v=v.get(k) if isinstance(v,dict) else None
+print("" if v is None else v)' "$@"; }
+say() { printf '%s: %s\n' "$prog" "$1" >&2; }
+
+case "$cmd" in
+acquire)
+  payload=$(python3 -c 'import json,sys
+m,x,t,mt,w,s,p,wf=sys.argv[1:9]
+d={}
+if m: d["memory_mb"]=int(m)
+if x=="1": d["exclusive"]=True
+if t: d["ttl_seconds"]=int(t)
+if mt: d["max_total_s"]=int(mt)
+if w: d["wait_s"]=int(w)
+elif wf=="1": d["wait"]=True
+if s: d["service_id"]=s
+if p: d["priority"]=p
+print(json.dumps(d))' "$memory" "$exclusive" "$ttl" "$maxtotal" "$wait_s" "$service" "$priority" "$wait_flag")
+  call POST "/resources/$target/leases" "$payload"
+  case "$code" in
+    2*) ;;
+    409) say "refused: $(field detail detail)$(field detail)"; printf '%s\n' "$resp" >&2; exit 4 ;;
+    *) printf '%s: HTTP %s\n%s\n' "$prog" "$code" "$resp" >&2; exit 5 ;;
+  esac
+  id=$(field lease_id); status=$(field status)
+  [ -n "$id" ] || die "no lease id in: $resp" 5
+  if [ -n "$state" ]; then umask 077; printf 'LEASE_ID=%s\n' "$id" > "$state"; fi
+  if [ "$status" = "queued" ]; then
+    until=$(field wait_until)
+    case "$until" in ""|null|None) until="with no deadline" ;; *) until="until $until" ;; esac
+    say "queued on $target at position $(field queue_position), waiting $until ($id)"
+  fi
+  while [ "$status" = "queued" ]; do
+    call GET "/leases/$id/wait?timeout_s=60"
+    case "$code" in 2*) ;; *) printf '%s: HTTP %s\n%s\n' "$prog" "$code" "$resp" >&2; exit 5 ;; esac
+    status=$(field status)
+    [ "$status" = "queued" ] && say "still queued, position $(field queue_position)"
+  done
+  case "$status" in
+    active) say "granted $id on $target, expires $(field expires_at)"; printf '%s\n' "$id"; exit 0 ;;
+    *) say "$id left the queue as '$status' ($(field expiry_reason)) — not granted"; printf '%s\n' "$id"; exit 3 ;;
+  esac ;;
+hold)
+  ttl="${ttl:-1800}"; every="${every:-$(( ttl / 3 > 0 ? ttl / 3 : 1 ))}"
+  while :; do
+    sleep "$every"
+    call POST "/leases/$target/renew" "{\"ttl_seconds\": $ttl}"
+    case "$code" in
+      2*) [ "$(field reason)" = "ttl_below_granted" ] && say "renewal extends nothing: --ttl $ttl is below the grant" ;;
+      404) say "lease $target is gone ($(field detail status)); hold ends"; exit 0 ;;
+      *) say "renew HTTP $code: $resp" ;;
+    esac
+  done ;;
+release)
+  if [ -n "$pids" ]; then
+    # The bytes go back only on evidence. A pid that is observed gone is evidence;
+    # a wait that ran out is not, and neither is a ps that failed. While the
+    # processes live or cannot be observed, the claim is kept: exit 3, no DELETE.
+    limit="${timeout:-120}"; waited=0; seen=""
+    while :; do
+      seen=$(observe_pids $pids)
+      case "$seen" in gone) break ;; esac
+      [ "$waited" -ge "$limit" ] && break
+      sleep 2; waited=$((waited + 2))
+    done
+    case "$seen" in
+      gone) ;;
+      unknown) say "could not observe $pids (ps failed) — the claim is kept, not released; run release again"; exit 3 ;;
+      *) say "still running after ${limit}s: ${seen#alive } — the claim is kept, not released; run release again once they have exited"; exit 3 ;;
+    esac
+  fi
+  call DELETE "/leases/$target"
+  case "$code" in
+    2*) say "released $target$( [ -n "$(field promoted)" ] && printf ', promoted %s' "$(field promoted)")"; exit 0 ;;
+    404) say "lease $target was already gone"; exit 0 ;;
+    *) printf '%s: HTTP %s\n%s\n' "$prog" "$code" "$resp" >&2; exit 5 ;;
+  esac ;;
+status)
+  call GET "/leases/$target"
+  case "$code" in 2*) printf '%s\n' "$resp"; exit 0 ;; *) printf '%s: HTTP %s\n%s\n' "$prog" "$code" "$resp" >&2; exit 5 ;; esac ;;
+queue)
+  call GET "/resources/$target"
+  case "$code" in 2*) ;; *) printf '%s: HTTP %s\n%s\n' "$prog" "$code" "$resp" >&2; exit 5 ;; esac
+  RESP="$resp" python3 -c 'import json,os
+d=json.loads(os.environ["RESP"])
+print("available_mb", d.get("available_memory_mb"))
+for l in d.get("leases",[]):
+    if l.get("status")=="active": print("active ", l["id"], l.get("service_id") or l.get("agent_id"), l.get("memory_mb"), "exclusive" if l.get("exclusive") else "", "expires", l.get("expires_at"))
+for q in d.get("queue",[]):
+    print("queued ", q["position"], q["lease_id"], q.get("service_id") or q.get("agent_id"), q.get("memory_mb"), "exclusive" if q.get("exclusive") else "", q.get("priority"), "until", q.get("wait_until"))' ;;
+esac

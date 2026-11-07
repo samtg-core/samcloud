@@ -1,0 +1,334 @@
+# samcloud control plane
+#
+# Usage:
+#   docker compose --env-file .env.staging up -d                     # control plane only
+#   docker compose --env-file .env.staging --profile sim up -d       # + sim devices
+#   docker compose --env-file .env.staging --profile seed up -d      # + seed data
+#   docker compose --env-file .env.staging --profile sim --profile seed up -d  # both
+
+# Container logs are capped here and nowhere else. json-file is the default driver
+# and its default is UNBOUNDED, which filled the 30G Colima data disk on 2026-09-24:
+# the registry's own log reached 14.8G, sqlite then failed every write with
+# "database or disk is full", and because each 500 logged a stack trace the failure
+# fed itself. Every long-lived service carries this anchor.
+x-logging: &default-logging
+  driver: json-file
+  options:
+    max-size: "50m"
+    max-file: "3"
+
+services:
+
+  # ── Control Plane ─────────────────────────────────────────
+
+  registry:
+    build:
+      context: ..
+      dockerfile: deploy/Dockerfile.registry
+      args:
+        GIT_COMMIT: ${GIT_COMMIT:-unknown}
+        SAMCLOUD_VERSION: ${SAMCLOUD_VERSION:-dev}
+    volumes:
+      - registry-data:/data
+      # The PUBLIC halves of the sshd container's host keys, so the registry can
+      # verify what it ssh's into. Deliberately not `sshd-keys`: that volume holds
+      # the private host keys, and anything holding those can present itself AS the
+      # gateway to every device that dials in. sshd-entrypoint.sh copies the two
+      # .pub files here by name on every boot, so the anchor follows a regenerated
+      # key and there is nothing to clear. Without this mount the registry cannot
+      # check what it is talking to, and forward.py says so in its log.
+      - sshd-hostpub:/sshd-hostpub:ro
+    environment:
+      REGISTRY_DB_PATH: /data/registry.db
+      REGISTRY_FILE_ROOT: /data/files
+      REGISTRY_HOST: "0.0.0.0"
+      REGISTRY_PORT: "7777"
+      REGISTRY_URL: http://registry:7777
+      # Where people and agents reach this plane; the env file sets it (#1010).
+      PUBLIC_URL: ${PUBLIC_URL:?set PUBLIC_URL in the env file, see deploy/.env.example}
+      # Where devices dial their reverse tunnel. Unset, PUBLIC_URL's host.
+      # SLICE_HOST is its old name, still read when PLANE_HOST is unset.
+      PLANE_HOST: ${PLANE_HOST:-}
+      SLICE_HOST: ${SLICE_HOST:-}
+      # Default domain for routes and services that name none (#1010). Unset, the
+      # registry uses PUBLIC_URL's host itself.
+      SAMCLOUD_DOMAIN: ${SAMCLOUD_DOMAIN:-}
+      # Optional modules (docs/DNS and TLS.md). Unset, dns-namecheap follows its credentials.
+      SAMCLOUD_MODULES: ${SAMCLOUD_MODULES:-}
+      # Planes a helper's --plane can name (name=url,...); unset, only this one (#1010).
+      SAMCLOUD_PLANES: ${SAMCLOUD_PLANES:-}
+      # Broker modules' URLs for the helpers and skills; unset, ghb./gglb./awsb. under SAMCLOUD_DOMAIN.
+      GH_BROKER_URL: ${GH_BROKER_URL:-}
+      GOOGLE_BROKER_URL: ${GOOGLE_BROKER_URL:-}
+      AWS_BROKER_URL: ${AWS_BROKER_URL:-}
+      RAIL_TOKEN_MINT_URL: ${RAIL_TOKEN_MINT_URL:-}
+      # The repo the contributing skill names (owner/name); unset, OWNER/samcloud.
+      SAMCLOUD_REPO: ${SAMCLOUD_REPO:-}
+      SAMCLOUD_ADMIN_SEAT: ${SAMCLOUD_ADMIN_SEAT:-}
+      OPERATOR_TZ: ${OPERATOR_TZ:-UTC}
+      AUTHORIZED_KEYS_PATH: /data/authorized_keys
+      GATEWAY_KEY: /data/keys/gateway
+      GATEWAY_KEY_FORCECOMMAND: /etc/ssh/keys/gateway
+      GATEWAY_BINARY: /usr/local/bin/samcloud-gateway
+      GATEWAY_TOKEN_PATH: /data/keys/gateway_token
+      CADDY_ADMIN_HOST: caddy
+      CADDY_ADMIN_PORT: "2019"
+      CADDYFILE_PATH: /data/Caddyfile
+      FORWARD_SSH_HOST: sshd
+      FORWARD_SSH_KEY: /data/keys/gateway
+      FORWARD_SSH_USER: samcloud
+      # Where the sshd container's host PUBLIC keys are readable from here
+      SSHD_HOST_KEYS_DIR: /sshd-hostpub
+      PORT_RANGE_TUNNEL_START: ${TUNNEL_RANGE_START:-10001}
+      PORT_RANGE_TUNNEL_END: ${TUNNEL_RANGE_END:-10099}
+      PORT_RANGE_FORWARD_START: ${FORWARD_RANGE_START:-18001}
+      PORT_RANGE_FORWARD_END: ${FORWARD_RANGE_END:-18099}
+      # Ports a route gets when there is no domain to name it under; caddy publishes them.
+      PORT_RANGE_ROUTE_START: ${ROUTE_RANGE_START:-18101}
+      PORT_RANGE_ROUTE_END: ${ROUTE_RANGE_END:-18110}
+      NAMECHEAP_API_KEY: ${NAMECHEAP_API_KEY:-}
+      NAMECHEAP_API_USER: ${NAMECHEAP_API_USER:-}
+      # The gateway's published port, below: the same default (#1010).
+      PLANE_SSH_PORT: ${SSH_PORT:-2200}
+      # SLICE_SSH_USER is PLANE_SSH_USER's old name, still read when it is unset.
+      PLANE_SSH_USER: ${PLANE_SSH_USER:-}
+      SLICE_SSH_USER: ${SLICE_SSH_USER:-samcloud}
+      # Deploy env (#106): namespaces device-side bootstrap artifacts so prod +
+      # staging can coexist on one machine. prod default keeps the bare names.
+      SAMCLOUD_ENV: ${SAMCLOUD_ENV:-prod}
+      PUBLIC_HTTPS_PORT: ${SSLH_PORT:-9443}
+      # Publicly-reachable gateway SSH endpoint for generated `ssh samcloud` aliases /
+      # guides. Defaults to PLANE_HOST:SSH_PORT (correct on prod, :2222 forwarded). On
+      # staging only the sslh mux is public, so .env.staging overrides these to :9443.
+      GATEWAY_SSH_HOST: ${GATEWAY_SSH_HOST:-}
+      GATEWAY_SSH_PORT: ${GATEWAY_SSH_PORT:-}
+    ports:
+      - "${REGISTRY_PORT:-7778}:7777"
+    networks:
+      - controlplane
+    healthcheck:
+      test: ["CMD", "python3", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:7777/health')"]
+      interval: 10s
+      timeout: 10s
+      retries: 5
+      start_period: 10s
+    restart: unless-stopped
+    logging: *default-logging
+
+  console:
+    build:
+      context: ..
+      dockerfile: deploy/Dockerfile.console
+      args:
+        REGISTRY_URL: http://registry:7777
+    environment:
+      REGISTRY_URL: http://registry:7777
+      AUTH_SECRET: "${AUTH_SECRET:?set AUTH_SECRET in the env file: openssl rand -hex 32}"
+      # Unset, the login cookie is Secure when the request came over HTTPS (#1010).
+      SESSION_COOKIE_SECURE: ${SESSION_COOKIE_SECURE:-}
+      NODE_ENV: production
+    ports:
+      - "${CONSOLE_PORT:-3010}:3000"
+    networks:
+      - controlplane
+    depends_on:
+      registry:
+        condition: service_healthy
+    restart: unless-stopped
+    logging: *default-logging
+
+  caddy:
+    build:
+      context: ..
+      dockerfile: deploy/Dockerfile.caddy
+    volumes:
+      - caddy-data:/data
+      - caddy-config:/config
+      - registry-data:/registry-data
+    environment:
+      CONSOLE_DOMAIN: ${CONSOLE_DOMAIN:-:443}
+      ACME_CA: ${ACME_CA:-}
+      ACME_EMAIL: ${ACME_EMAIL:-}
+      NAMECHEAP_API_KEY: ${NAMECHEAP_API_KEY:-}
+      NAMECHEAP_API_USER: ${NAMECHEAP_API_USER:-}
+      RUSTDESK_DOMAIN: ${RUSTDESK_DOMAIN:-}
+    ports:
+      - "${HTTPS_PORT:-8444}:443"
+      - "${HTTP_PORT:-9080}:80"
+      # Routes under a bare address, one port each, plain HTTP (#1010).
+      - "${ROUTE_RANGE_START:-18101}-${ROUTE_RANGE_END:-18110}:${ROUTE_RANGE_START:-18101}-${ROUTE_RANGE_END:-18110}"
+    networks:
+      - controlplane
+    restart: unless-stopped
+    logging: *default-logging
+
+  sshd:
+    build:
+      context: ..
+      dockerfile: deploy/Dockerfile.sshd
+    volumes:
+      - sshd-keys:/etc/ssh/keys
+      # Public halves only; the registry mounts this read-only to verify this
+      # container without being able to impersonate it.
+      - sshd-hostpub:/etc/ssh/hostpub
+      # Two FILES, not the volume root (#901, #757). sshd-entrypoint.sh reads
+      # exactly these two paths and only at boot -- authorized_keys (line 52)
+      # and keys/gateway (line 65) -- so mounting the root handed a container
+      # reachable by 35 unforced-command device keys read access to
+      # registry.db, two pre-migration backups, the Caddyfile and 533 uploaded
+      # files. Subpath mounts keep the paths the entrypoint already expects, so
+      # that script needs no change. Verified in a throwaway container: it sees
+      # these two and nothing else.
+      - type: volume
+        source: registry-data
+        target: /registry-data/authorized_keys
+        read_only: true
+        volume:
+          subpath: authorized_keys
+      - type: volume
+        source: registry-data
+        target: /registry-data/keys/gateway
+        read_only: true
+        volume:
+          subpath: keys/gateway
+    environment:
+      REGISTRY_URL: http://registry:7777
+    ports:
+      - "${SSH_PORT:-2200}:22"
+    networks:
+      - controlplane
+    depends_on:
+      registry:
+        condition: service_healthy
+    restart: unless-stopped
+    logging: *default-logging
+
+  sslh:
+    build:
+      context: ..
+      dockerfile: deploy/Dockerfile.sslh
+    ports:
+      - "${SSLH_PORT:-9443}:443"
+    networks:
+      - controlplane
+    depends_on:
+      - caddy
+      - sshd
+    restart: unless-stopped
+    logging: *default-logging
+
+  # ── Sim Devices (--profile sim) ───────────────────────────
+
+  sim-alpha:
+    profiles: ["sim"]
+    build:
+      context: ../staging/sim-device
+    ports:
+      - "${SIM_SSH_START:-2201}:22"
+      - "${SIM_HEALTH_START:-9201}:8080"
+    environment:
+      DEVICE_ID: dev-alpha
+      DEVICE_TYPE: server
+      REGISTRY_URL: http://registry:7777
+    hostname: dev-alpha
+    volumes:
+      - bootstrap-urls:/bootstrap:ro
+    networks:
+      - controlplane
+    depends_on:
+      registry:
+        condition: service_healthy
+
+  sim-bravo:
+    profiles: ["sim"]
+    build:
+      context: ../staging/sim-device
+    ports:
+      - "${SIM_SSH_BRAVO:-2202}:22"
+      - "${SIM_HEALTH_BRAVO:-9202}:8080"
+    environment:
+      DEVICE_ID: dev-bravo
+      DEVICE_TYPE: server
+      REGISTRY_URL: http://registry:7777
+    hostname: dev-bravo
+    volumes:
+      - bootstrap-urls:/bootstrap:ro
+    networks:
+      - controlplane
+    depends_on:
+      registry:
+        condition: service_healthy
+
+  sim-charlie:
+    profiles: ["sim"]
+    build:
+      context: ../staging/sim-device
+    ports:
+      - "${SIM_SSH_CHARLIE:-2203}:22"
+      - "${SIM_HEALTH_CHARLIE:-9203}:8080"
+    environment:
+      DEVICE_ID: dev-charlie
+      DEVICE_TYPE: gpu
+      REGISTRY_URL: http://registry:7777
+    hostname: dev-charlie
+    volumes:
+      - bootstrap-urls:/bootstrap:ro
+    networks:
+      - controlplane
+    depends_on:
+      registry:
+        condition: service_healthy
+
+  sim-delta:
+    profiles: ["sim"]
+    build:
+      context: ../staging/sim-device
+    ports:
+      - "${SIM_SSH_DELTA:-2204}:22"
+      - "${SIM_HEALTH_DELTA:-9204}:8080"
+    environment:
+      DEVICE_ID: dev-delta
+      DEVICE_TYPE: gpu
+      REGISTRY_URL: http://registry:7777
+    hostname: dev-delta
+    volumes:
+      - bootstrap-urls:/bootstrap:ro
+    networks:
+      - controlplane
+    depends_on:
+      registry:
+        condition: service_healthy
+
+  # ── Seed (--profile seed) ─────────────────────────────────
+
+  seed:
+    profiles: ["seed"]
+    image: curlimages/curl:latest
+    user: "0"
+    volumes:
+      - ./seed-entrypoint.sh:/seed.sh:ro
+      - bootstrap-urls:/bootstrap
+    entrypoint: ["/bin/sh", "/seed.sh"]
+    networks:
+      - controlplane
+    depends_on:
+      registry:
+        condition: service_healthy
+
+volumes:
+  registry-data:
+    driver: local
+  caddy-data:
+    driver: local
+  caddy-config:
+    driver: local
+  sshd-keys:
+    driver: local
+  sshd-hostpub:
+    driver: local
+  bootstrap-urls:
+    driver: local
+
+networks:
+  controlplane:
+    driver: bridge

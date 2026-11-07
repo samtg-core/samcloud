@@ -1,0 +1,31 @@
+# Stage 1: Build gateway binary from Go source
+FROM golang:1.24-bookworm AS go-builder
+
+WORKDIR /src
+COPY gateway/ .
+# Gateway is stdlib-only; safe to build with slightly older Go
+RUN GOTOOLCHAIN=local CGO_ENABLED=0 GOOS=linux \
+    sed -i 's/^go .*/go 1.24/' go.mod && \
+    go build -o /samcloud-gateway .
+
+# Stage 2: OpenSSH server + gateway
+FROM debian:bookworm-slim
+
+RUN apt-get update && \
+    apt-get install -y --no-install-recommends \
+        openssh-server \
+        autossh \
+        curl \
+    && rm -rf /var/lib/apt/lists/* \
+    && mkdir -p /run/sshd /etc/ssh/keys /registry-data
+
+COPY --from=go-builder /samcloud-gateway /usr/local/bin/samcloud-gateway
+COPY deploy/sshd-entrypoint.sh /entrypoint.sh
+RUN chmod +x /entrypoint.sh
+
+EXPOSE 22
+# Tunnel + forward port ranges
+EXPOSE 10001-10099
+EXPOSE 18001-18099
+
+ENTRYPOINT ["/entrypoint.sh"]

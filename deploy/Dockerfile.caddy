@@ -1,0 +1,14 @@
+# Caddy with Namecheap DNS-01 module for TLS cert provisioning
+FROM caddy:2-builder AS builder
+
+RUN xcaddy build --with github.com/caddy-dns/namecheap --output /usr/bin/caddy
+
+FROM caddy:2
+
+COPY --from=builder /usr/bin/caddy /usr/bin/caddy
+COPY deploy/caddy-entrypoint.sh /entrypoint.sh
+RUN chmod +x /entrypoint.sh
+
+EXPOSE 443 80 2019
+
+ENTRYPOINT ["/entrypoint.sh"]

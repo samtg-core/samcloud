@@ -1,0 +1,53 @@
+# Simulated samcloud network
+# Spins up target devices with real sshd + health endpoints
+# Gateway pubkey is installed via enrollment flow (setup.sh), not hardcoded.
+#
+# Usage:
+#   cd staging/sim-network
+#   docker compose up -d
+#   docker compose down
+
+services:
+  sim-media:
+    build: ../sim-device
+    ports:
+      - "2201:22"
+      - "9201:8080"
+    environment:
+      DEVICE_ID: sim-media
+      DEVICE_TYPE: media-server
+    hostname: sim-media
+
+  sim-homehub:
+    build: ../sim-device
+    ports:
+      - "2202:22"
+      - "9202:8080"
+    environment:
+      DEVICE_ID: sim-homehub
+      DEVICE_TYPE: compute
+    hostname: sim-homehub
+
+  sim-gpu-1:
+    build: ../sim-device
+    ports:
+      - "2203:22"
+      - "9203:8080"
+    environment:
+      DEVICE_ID: sim-gpu-1
+      DEVICE_TYPE: gpu-workstation
+    hostname: sim-gpu-1
+
+  sim-gpu-2:
+    build: ../sim-device
+    ports:
+      - "2204:22"
+      - "9204:8080"
+    environment:
+      DEVICE_ID: sim-gpu-2
+      DEVICE_TYPE: gpu-workstation
+    hostname: sim-gpu-2
+
+networks:
+  default:
+    name: samcloud-sim

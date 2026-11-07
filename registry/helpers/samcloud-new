@@ -1,0 +1,178 @@
+#!/usr/bin/env bash
+# NEW_VERSION: 1.1.0
+# Served as GET /api/v1/helpers/new. Install from the plane you write to:
+#   curl -s -H @"$HOME/.samcloud/__TOKEN_HDR__" __API__/helpers/new > ~/.local/bin/sc-new && chmod +x ~/.local/bin/sc-new
+# sc-new — samcloud CREATE primitive. The sibling of sc-say, which is comment-only.
+#
+# Why this exists: a create issued as bare `curl` carries no headers, so the plane
+# cannot tell which conversation made it. It binds nothing, and lands in the
+# identity's own thread rather than this conversation's. This pen sends
+# X-Session-Id on every create, and X-Thread-Id when you name one.
+#
+#   sc-new ticket --summary "the gate misses four helpers" --assignee admin < body.md
+#   echo "detail" | sc-new task --project scope-next-run --title "re-run the breadth"
+#   sc-new doc --title "Run record" -f record.md
+#   sc-new ticket --summary "probe" --dry            # show what would be sent, send nothing
+#
+# Every create joins a thread; none starts a second one (#886). Which one:
+#   --thread N  >  $SAMCLOUD_THREAD_ID  >  the plane's rule: a subtask's parent,
+#   the thread your holder holds, your conversation's own thread (its first
+#   create started it).
+#
+# Plane and auth are resolved exactly as sc-say does (see its header). The bearer
+# never touches argv: a header file rides `curl -H @file`, a raw token goes via
+# `curl --config <(...)` on its own fd (#582).
+#
+# bash 3.2 compatible (stock macOS). Requires: curl, python3.
+set -u
+
+prog=${0##*/}
+die() { printf '%s: %s\n' "$prog" "$1" >&2; exit "${2:-1}"; }
+
+kind=""; summary=""; project=""; assignee=""; ttype=""; priority=""
+group=""; file=""; plane=""; hdr=""; thread=""; dry=0
+while [ $# -gt 0 ]; do
+  case "$1" in
+    ticket|doc|task)   kind="$1"; shift ;;
+    --summary|--title) summary="${2:-}"; shift 2 || die "missing text after $1" 2 ;;
+    --project|-p)      project="${2:-}"; shift 2 || die "missing slug after --project" 2 ;;
+    --assignee|-a)     assignee="${2:-}"; shift 2 || die "missing name after --assignee" 2 ;;
+    --type)            ttype="${2:-}"; shift 2 || die "missing value after --type" 2 ;;
+    --priority)        priority="${2:-}"; shift 2 || die "missing value after --priority" 2 ;;
+    --group)           group="${2:-}"; shift 2 || die "missing group after --group" 2 ;;
+    --thread|-t)       thread="${2:-}"; shift 2 || die "missing id after --thread" 2 ;;
+    --no-thread)       die "--no-thread is gone (#886): what a conversation makes joins its own thread. Name one with --thread N" 2 ;;
+    -f|--file)         file="${2:-}"; shift 2 || die "missing path after -f" 2 ;;
+    --plane)           plane="${2:-}"; shift 2 || die "missing value after --plane" 2 ;;
+    --hdr)             hdr="${2:-}"; shift 2 || die "missing path after --hdr" 2 ;;
+    --dry|-n)          dry=1; shift ;;
+    -h|--help)         sed -n '2,28p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
+    *) die "unknown argument '$1' (try --help)" 2 ;;
+  esac
+done
+[ -n "$kind" ] || die "usage: $prog {ticket|doc|task} --summary TEXT [--thread N] [-f FILE]" 2
+[ -n "$summary" ] || die "a $kind needs --summary (or --title)" 2
+[ "$kind" = "task" ] && [ -z "$project" ] && die "a task needs --project <slug>" 2
+
+# ── plane (identical precedence to sc-say) ────────────────────────────────────
+tokf="${SAMCLOUD_TOKEN_FILE:-$HOME/.samcloud/token}"
+served_api="__API__"
+[ "$served_api" = "__"API"__" ] && served_api=""
+seat_api=$(grep -m1 '^API=' "$HOME/.config/samcloud/wake.env" 2>/dev/null | cut -d= -f2- | tr -d '"')
+case "$plane" in
+  # __PLANE_PRESETS__
+  "")   api="${SAMCLOUD_API:-${seat_api:-$served_api}}" ;;
+  *) die "--plane must be __PLANE_NAMES__, got '$plane'" 2 ;;
+esac
+api=${api%/}
+[ -n "$api" ] || die "no API: this copy was not served by a registry and the seat has no wake.env" 2
+case "$api" in */api/v1) ;; *) api="$api/api/v1" ;; esac
+
+# ── auth (identical precedence to sc-say) ─────────────────────────────────────
+authhdr=""
+if [ -n "$hdr" ]; then
+  [ -r "$hdr" ] || die "header file not readable: $hdr"
+  authhdr="$hdr"
+elif [ -n "${SAMCLOUD_AUTH_HDR:-}" ]; then
+  [ -r "$SAMCLOUD_AUTH_HDR" ] || die "SAMCLOUD_AUTH_HDR not readable: $SAMCLOUD_AUTH_HDR"
+  authhdr="$SAMCLOUD_AUTH_HDR"
+elif [ -n "$tokf" ] && [ -r "${tokf}.hdr" ]; then
+  authhdr="${tokf}.hdr"
+fi
+if [ -z "$authhdr" ]; then
+  [ -r "$tokf" ] || die "no auth: no header file at ${tokf}.hdr and no token at $tokf" 2
+fi
+
+# ── body (optional for ticket/task, required for doc) ─────────────────────────
+body=""
+if [ -n "$file" ]; then
+  [ -r "$file" ] || die "cannot read $file"
+  body=$(cat -- "$file")
+elif [ ! -t 0 ]; then
+  body=$(cat)
+fi
+[ "$kind" = "doc" ] && [ -z "$body" ] && die "a doc needs a body: pipe it on stdin or pass -f FILE" 2
+
+# ── the conversation, and the thread it joins ─────────────────────────────────
+sid="${SAMCLOUD_SESSION_ID:-${CLAUDE_CODE_SESSION_ID:-}}"
+
+if [ -z "$thread" ]; then
+  thread="${SAMCLOUD_THREAD_ID:-}"
+fi
+case "$thread" in (*[!0-9]*) die "--thread must be numeric, got '$thread'" 2 ;; esac
+
+case "$kind" in
+  ticket) url="$api/tickets" ;;
+  doc)    url="$api/docs" ;;
+  task)   url="$api/projects/$project/tasks" ;;
+esac
+
+payload=$(KIND="$kind" SUMMARY="$summary" BODY="$body" ASSIGNEE="$assignee" \
+          TTYPE="$ttype" PRIORITY="$priority" GROUP="$group" python3 -c '
+import json, os, sys
+k = os.environ["KIND"]; body = os.environ["BODY"]
+d = {}
+if k == "ticket":
+    d["summary"] = os.environ["SUMMARY"]
+    if body: d["body"] = body
+    if os.environ["TTYPE"]: d["type"] = os.environ["TTYPE"]
+elif k == "doc":
+    d["title"] = os.environ["SUMMARY"]; d["body"] = body
+else:
+    d["title"] = os.environ["SUMMARY"]
+    if body: d["detail"] = body
+if os.environ["ASSIGNEE"]: d["assignee"] = os.environ["ASSIGNEE"]
+if os.environ["PRIORITY"]: d["priority"] = os.environ["PRIORITY"]
+if os.environ["GROUP"]: d["group_scope"] = os.environ["GROUP"]
+sys.stdout.write(json.dumps(d))') || die "failed to encode the payload as JSON"
+
+if [ "$dry" -eq 1 ]; then
+  printf 'POST %s\n' "$url"
+  printf 'X-Session-Id: %s\n' "${sid:-<unset>}"
+  printf 'X-Thread-Id: %s\n' "${thread:-<none — the plane picks: parent, held thread, or the conversation home>}"
+  if [ -n "$authhdr" ]; then printf 'auth: header file %s\n' "$authhdr"
+  else printf 'auth: raw token file %s\n' "$tokf"; fi
+  printf -- '--- payload ---\n%s\n' "$payload"
+  exit 0
+fi
+
+# X-Thread-Id is sent only when we have one: an empty value is a 400 from the plane.
+set -- -X POST "$url" -H 'Content-Type: application/json' -H "X-Session-Id: ${sid}"
+[ -n "$thread" ] && set -- "$@" -H "X-Thread-Id: ${thread}"
+
+if [ -n "$authhdr" ]; then
+  out=$(curl -sS -H @"$authhdr" "$@" -w '\n%{http_code}' --data-binary @- <<<"$payload" 2>&1) \
+    || die "curl failed: $out"
+else
+  out=$(curl -sS --config <(printf 'header = "Authorization: Bearer %s"\n' "$(cat "$tokf")") \
+          "$@" -w '\n%{http_code}' --data-binary @- <<<"$payload" 2>&1) || die "curl failed: $out"
+fi
+
+code=$(printf '%s' "$out" | tail -n1)
+resp=$(printf '%s' "$out" | sed '$d')
+
+case "$code" in
+  2*) ;;
+  *) printf '%s: HTTP %s\n%s\n' "$prog" "$code" "$resp" >&2; exit 4 ;;
+esac
+
+# Report the thread the plane actually chose, not the one we asked for: a create
+# whose thread was declined is the failure this pen exists to make visible.
+RESP="$resp" KIND="$kind" ASKED="${thread:-}" python3 -c '
+import json, os
+raw = os.environ["RESP"]; kind = os.environ["KIND"]; asked = os.environ["ASKED"]
+try:
+    d = json.loads(raw)
+except Exception:
+    print("sc-new: created, unparsed response:", raw[:300]); raise SystemExit
+oid = d.get(kind + "_id") or d.get("id")
+got = d.get("thread_id")
+line = "sc-new: created %s %s" % (kind, oid)
+if got is not None:
+    line += " in thread %s" % got
+    if asked and str(got) != str(asked):
+        line += " (ASKED FOR %s — the plane chose otherwise)" % asked
+elif asked:
+    line += " (asked for thread %s; the response does not say which it used)" % asked
+print(line)
+'

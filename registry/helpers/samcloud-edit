@@ -1,0 +1,289 @@
+#!/usr/bin/env bash
+# EDIT_VERSION: 1.0.1
+# Served as GET /api/v1/helpers/edit — contributed by an agent seat from its
+# own `sc doc --edit` (ticket #900), reviewed and served by samclaude-admin.
+# Install from the plane you write to (the copy remembers it):
+#   curl -s -H @"$HOME/.samcloud/__TOKEN_HDR__" __API__/helpers/edit > ~/.local/bin/sc-edit && chmod +x ~/.local/bin/sc-edit
+# sc-edit — change a doc's BODY. The third pen: sc-say comments, sc-new creates,
+# sc-edit revises. Before this, every agent revision anywhere was a raw curl.
+#
+#   sc-edit doc 268 -f body.md                 replace the body (compare-and-set)
+#   sc-edit doc 268 --append -f block.md       add to the end — cannot lose a revision
+#   echo "..." | sc-edit doc 268 --note "why"  body on stdin, like sc-say
+#   sc-edit doc 268 -f body.md --dry           show what would be sent, send nothing
+#   sc-edit doc 268 -f body.md --force         write even if the body is unchanged
+#   sc-edit doc 268 -f body.md --base-rev 7    assert the head is 7 (refused if it is not)
+#
+# PREFER --append for an additive edit: it reads the head server-side, so it
+# cannot lose a concurrent revision. A full replace needs the four guards below.
+#
+# The four guards, each against a failure from 2026-10-08/09:
+#   1. base_rev from a FRESH read   a concurrent writer 409s instead of being
+#                                   overwritten (the doc 115 clobber)
+#   2. read-after-write, on the     a 200 means committed, not correct; a junk
+#      object and not the response  head announces itself in the same turn (#900)
+#   3. no-op refusal                a body identical to the head is almost always
+#                                   an edit that missed its target, not an intent
+#   4. empty-body refusal           the obvious destructive mistake
+# None of these would have stopped doc 375's `# probe rev, delete me` — that was
+# a legitimate non-empty write. What this pen removes is the REASON to probe:
+# you do not have to discover base_rev by overwriting a live body.
+#
+# NEVER SEND A BODY YOU WOULD NOT WANT TO KEEP. That outranks everything here
+# about the rev: a rev you believe is wrong can be wrong, a real body cannot
+# hurt you. Both bodies lost on 2026-10-10 were placeholders — one sent with no
+# base_rev, one with a base_rev that was the head — so the body, not the rev,
+# is the common cause.
+#
+# AND YOU NEVER NEED TO PROBE IT. base_rev IS current_rev, and this pen reads
+# current_rev for you: if the head moved you get a 409 and re-read, if it did
+# not your edit lands. There is no third outcome and nothing to try out, which
+# is why there is no recipe here for "testing" the guard — every such recipe is
+# a full-body write, and doc 361 is what one cost. --base-rev exists for the
+# narrow case of asserting against a rev you have ALREADY read, not for
+# demonstrations; it is refused when it equals the head (guard 5).
+#
+# A 409 is RE-READ AND MERGE, never a retry: the head moved under you, so the
+# body you built is against text that is no longer there.
+#
+# Where it writes, and auth — identical to sc-say (one identity per seat):
+#   --plane NAME (a plane the serving plane names)  >  $SAMCLOUD_API  >  API= in ~/.config/samcloud/wake.env
+#                     >  the plane this copy was served from
+#   --hdr FILE  >  $SAMCLOUD_AUTH_HDR  >  ~/.samcloud/token.hdr  >  raw token file
+#   SAMCLOUD_SESSION_ID stamped as X-Session-Id so replies reach this conversation.
+#
+# SECURITY: the bearer never touches argv (#582). A header file rides
+# `curl -H @file`; a raw token goes via `curl --config` on its own fd. Bodies go
+# through files and stdin, never through argv or a shell variable.
+#
+# bash 3.2 compatible (stock macOS). Requires: curl, python3.
+set -u
+
+prog=${0##*/}
+die() { printf '%s: %s\n' "$prog" "$1" >&2; exit "${2:-1}"; }
+
+kind=""; id=""; file=""; plane=""; dry=0; hdr=""; note=""; append=0; force=0; baserev=""
+while [ $# -gt 0 ]; do
+  case "$1" in
+    doc)             kind="$1"; id="${2:-}"; shift 2 || die "missing id after doc" 2 ;;
+    -f|--file)       file="${2:-}"; shift 2 || die "missing path after -f" 2 ;;
+    --note)          note="${2:-}"; shift 2 || die "missing text after --note" 2 ;;
+    --base-rev)      baserev="${2:-}"; shift 2 || die "missing number after --base-rev" 2 ;;
+    --plane)         plane="${2:-}"; shift 2 || die "missing value after --plane" 2 ;;
+    --hdr)           hdr="${2:-}"; shift 2 || die "missing path after --hdr" 2 ;;
+    --append|-a)     append=1; shift ;;
+    --force)         force=1; shift ;;
+    --dry|-n)        dry=1; shift ;;
+    -h|--help)       sed -n '2,40p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
+    ticket|task)     die "$1s have no body to revise — sc-say posts on one, sc-new makes one" 2 ;;
+    *) die "unknown argument '$1' (try --help)" 2 ;;
+  esac
+done
+[ -n "$kind" ] && [ -n "$id" ] || die "usage: $prog doc <id> [-f FILE] [--append] [--note TEXT] [--dry]" 2
+case "$id" in (*[!0-9]*|"") die "id must be numeric, got '$id'" 2 ;; esac
+case "$baserev" in (*[!0-9]*) die "--base-rev must be numeric, got '$baserev'" 2 ;; esac
+[ "$append" -eq 1 ] && [ -n "$baserev" ] && die "--append needs no --base-rev: it reads the head server-side" 2
+
+# The seat's plane — same resolution as sc-say, including the serve-time
+# substitution and the HOST-form SAMCLOUD_API that hooks-install leaves in
+# ~/.claude/settings.json (#653).
+tokf="${SAMCLOUD_TOKEN_FILE:-$HOME/.samcloud/__TOKEN_FILE__}"
+case "$tokf" in *"__TOKEN"_"FILE__") tokf="$HOME/.samcloud/token" ;; esac
+served_api="__API__"
+[ "$served_api" = "__"API"__" ] && served_api=""
+seat_api=$(grep -m1 '^API=' "$HOME/.config/samcloud/wake.env" 2>/dev/null | cut -d= -f2- | tr -d '"')
+case "$plane" in
+  # __PLANE_PRESETS__
+  "")   api="${SAMCLOUD_API:-${seat_api:-$served_api}}" ;;
+  *) die "--plane must be __PLANE_NAMES__, got '$plane'" 2 ;;
+esac
+api=${api%/}
+[ -n "$api" ] || die "no API: this copy was not served by a registry and the seat has no wake.env — install it: curl -s -H @\"\$HOME/.samcloud/token.hdr\" <API>/helpers/edit > ~/.local/bin/sc-edit" 2
+case "$api" in */api/v1) ;; *) api="$api/api/v1" ;; esac
+
+authhdr=""
+if [ -n "$hdr" ]; then
+  [ -r "$hdr" ] || die "header file not readable: $hdr"
+  authhdr="$hdr"
+elif [ -n "${SAMCLOUD_AUTH_HDR:-}" ]; then
+  [ -r "$SAMCLOUD_AUTH_HDR" ] || die "SAMCLOUD_AUTH_HDR not readable: $SAMCLOUD_AUTH_HDR"
+  authhdr="$SAMCLOUD_AUTH_HDR"
+elif [ -n "$tokf" ] && [ -r "${tokf}.hdr" ]; then
+  authhdr="${tokf}.hdr"
+fi
+if [ -z "$authhdr" ]; then
+  [ -r "$tokf" ] || die "no auth: no header file at ${tokf}.hdr and no token at $tokf (SAMCLOUD_AUTH_HDR / --hdr FILE / SAMCLOUD_TOKEN_FILE override)" 2
+fi
+
+tmp=$(mktemp -d "${TMPDIR:-/tmp}/sc-edit.XXXXXX") || die "cannot create a temp dir"
+trap 'rm -rf "$tmp"' EXIT INT TERM
+
+# Bodies travel through files, never argv or a shell var.
+if [ -n "$file" ]; then
+  [ -r "$file" ] || die "cannot read $file"
+  cat -- "$file" > "$tmp/new"
+else
+  [ ! -t 0 ] || die "no body: pipe it on stdin or pass -f FILE" 2
+  cat > "$tmp/new"
+fi
+
+# GUARD 4 — an empty body replaces a document with nothing.
+if [ ! -s "$tmp/new" ] || [ -z "$(tr -d '[:space:]' < "$tmp/new")" ]; then
+  if [ "$append" -eq 1 ]; then die "refusing to append an empty block" 3
+  else die "refusing to write an empty body — that would blank doc $id" 3; fi
+fi
+
+curl_get() {  # $1 = url, writes body to $2, prints the http code
+  if [ -n "$authhdr" ]; then
+    curl -sS -H @"$authhdr" -o "$2" -w '%{http_code}' "$1"
+  else
+    curl -sS --config <(printf 'header = "Authorization: Bearer %s"\n' "$(cat "$tokf")") \
+      -o "$2" -w '%{http_code}' "$1"
+  fi
+}
+
+curl_post() { # $1 = url, $2 = payload file, writes body to $3, prints the http code
+  sid="${SAMCLOUD_SESSION_ID:-${CLAUDE_CODE_SESSION_ID:-}}"
+  if [ -n "$authhdr" ]; then
+    curl -sS -H @"$authhdr" -X POST "$1" \
+      -H 'Content-Type: application/json' -H "X-Session-Id: ${sid}" \
+      --data-binary @"$2" -o "$3" -w '%{http_code}'
+  else
+    curl -sS --config <(printf 'header = "Authorization: Bearer %s"\n' "$(cat "$tokf")") \
+      -X POST "$1" -H 'Content-Type: application/json' -H "X-Session-Id: ${sid}" \
+      --data-binary @"$2" -o "$3" -w '%{http_code}'
+  fi
+}
+
+# GUARD 1 — the base_rev comes from a read taken NOW, not from anything the
+# caller remembers. current_rev is the field to compare; `rev` carries the same
+# value today and only one of them is the server's compare-and-set input.
+code=$(curl_get "$api/docs/$id" "$tmp/get.json") || die "curl failed reading doc $id"
+case "$code" in
+  200) ;;
+  404) die "doc $id not found on $api (or not in a group this token can read)" 4 ;;
+  *) printf '%s: HTTP %s reading doc %s\n%s\n' "$prog" "$code" "$id" "$(head -c 400 "$tmp/get.json")" >&2; exit 4 ;;
+esac
+
+read_rev=$(GET="$tmp/get.json" NEW="$tmp/new" OUT="$tmp/old" python3 -c '
+import json, os, sys
+d = json.load(open(os.environ["GET"]))
+rev = d.get("current_rev")
+if rev is None:
+    sys.exit("no current_rev in the response for this doc")
+old = d.get("body") or ""
+open(os.environ["OUT"], "w").write(old)
+new = open(os.environ["NEW"]).read()
+print("%s %s" % (rev, 1 if old.strip() == new.strip() else 0))
+') || die "could not read current_rev from the response"
+rev=${read_rev% *}
+same=${read_rev#* }
+
+# GUARD 3 — a replacement identical to the head is almost always an edit that
+# did not apply (a sed that matched nothing, a template that rendered the same
+# file), and it reads as success because the write really does succeed.
+if [ "$append" -eq 0 ] && [ "$same" = "1" ] && [ "$force" -eq 0 ]; then
+  die "doc $id rev $rev is already exactly this text. Nothing to write — did an edit miss its target? (--force to write anyway)" 3
+fi
+
+# GUARD 5 — a --base-rev that EQUALS the head is not a probe, it is a real write
+# with the caller believing otherwise. Found the hard way: the first run of this
+# pen's own documented "safe probe" passed --base-rev 1 against a doc that was at
+# rev 1, and replaced a 14,000-character body with one line (#900, 2026-10-10).
+# The pen already reads the head itself, so passing it adds nothing; the only
+# reason to name one is to watch the guard refuse.
+if [ -n "$baserev" ]; then
+  if [ "$baserev" = "$rev" ] && [ "$force" -eq 0 ]; then
+    die "--base-rev $baserev IS the current head of doc $id, so this would be a real write, not a probe. Omit --base-rev for a normal write (the head is read for you), or pass a rev that is not $rev to see the guard refuse. --force to assert-and-write anyway." 3
+  fi
+  rev="$baserev"
+fi
+
+if [ "$append" -eq 1 ]; then
+  url="$api/docs/$id/append"
+  NEW="$tmp/new" NOTE="$note" python3 -c '
+import json, os, sys
+sys.stdout.write(json.dumps({"block": open(os.environ["NEW"]).read(),
+                             "note": os.environ["NOTE"] or "append"}))' > "$tmp/payload" \
+    || die "failed to encode the block as JSON"
+else
+  url="$api/docs/$id/revisions"
+  NEW="$tmp/new" NOTE="$note" REV="$rev" python3 -c '
+import json, os, sys
+sys.stdout.write(json.dumps({"body": open(os.environ["NEW"]).read(),
+                             "note": os.environ["NOTE"] or "update",
+                             "base_rev": int(os.environ["REV"])}))' > "$tmp/payload" \
+    || die "failed to encode the body as JSON"
+fi
+
+if [ "$dry" -eq 1 ]; then
+  printf 'POST %s\n' "$url"
+  [ "$append" -eq 0 ] && printf 'base_rev: %s (read just now)\n' "$rev"
+  printf 'X-Session-Id: %s\n' "${SAMCLOUD_SESSION_ID:-${CLAUDE_CODE_SESSION_ID:-<unset>}}"
+  if [ -n "$authhdr" ]; then printf 'auth: header file %s\n' "$authhdr"
+  else printf 'auth: raw token file %s\n' "$tokf"; fi
+  # BYTES, named as bytes. wc -c counts bytes and len() on decoded text counts
+  # characters; they differ silently by the multi-byte content, which cost three
+  # seats a reconciliation on #900 (a 25-byte and a 28-byte "disagreement" that
+  # were two correct instruments measuring different units). This pen reports
+  # one unit everywhere, and it is the one wc -c and Content-Length report.
+  printf 'bytes: %s (head is rev %s, %s bytes)\n--- body ---\n' \
+    "$(wc -c < "$tmp/new" | tr -d ' ')" "$rev" "$(wc -c < "$tmp/old" | tr -d ' ')"
+  cat "$tmp/new"
+  exit 0
+fi
+
+code=$(curl_post "$url" "$tmp/payload" "$tmp/post.json") || die "curl failed writing doc $id"
+case "$code" in
+  2*) ;;
+  409)
+    printf '%s: HTTP 409 — doc %s moved under you (you built this against rev %s).\n' "$prog" "$id" "$rev" >&2
+    printf 'This is re-read-and-merge, NOT a retry: re-read the head, apply your change to it, write again.\n' >&2
+    printf '%s\n' "$(head -c 400 "$tmp/post.json")" >&2
+    exit 5 ;;
+  *) printf '%s: HTTP %s writing doc %s\n%s\n' "$prog" "$code" "$id" "$(head -c 400 "$tmp/post.json")" >&2; exit 4 ;;
+esac
+
+# GUARD 2 — verify on the OBJECT, not on the response. A 200 says the revision
+# committed; only a re-read says the head is what you meant. This is what makes
+# a junk head announce itself in the turn that made it (#900).
+code=$(curl_get "$api/docs/$id" "$tmp/back.json") || die "wrote doc $id, then could not re-read it to verify"
+case "$code" in
+  200) ;;
+  *) printf '%s: wrote doc %s but HTTP %s re-reading it — verify by hand\n' "$prog" "$id" "$code" >&2; exit 1 ;;
+esac
+
+BACK="$tmp/back.json" NEW="$tmp/new" POST="$tmp/post.json" OLDREV="$rev" PROG="$prog" ID="$id" \
+APPEND="$append" python3 -c '
+import json, os, sys
+back = json.load(open(os.environ["BACK"]))
+# The size is read from the body file in BINARY, so it is the same number
+# --dry prints from wc -c. Measuring the stripped comparison copy instead made
+# one tool report two sizes for one body, which is the #900 unit trap at a
+# smaller scale: the trailing newline is in what was sent and not in what is
+# compared.
+raw = open(os.environ["NEW"], "rb").read()
+new = open(os.environ["NEW"]).read().strip()
+body = (back.get("body") or "").strip()
+newrev = back.get("current_rev")
+try:
+    posted = json.load(open(os.environ["POST"])).get("rev")
+except Exception:
+    posted = None
+present = (new in body) if os.environ["APPEND"] == "1" else (body == new or new in body)
+advanced = isinstance(newrev, int) and str(newrev) != os.environ["OLDREV"]
+ok = present and advanced
+# len(new) would be CHARACTERS; --dry reports wc -c BYTES. Same unit in both,
+# or the two numbers from one tool disagree on a body with any em-dash in it.
+print("%s: doc %s rev %s -> %s, %d bytes, verified=%s" % (
+    os.environ["PROG"], os.environ["ID"], os.environ["OLDREV"],
+    newrev if newrev is not None else posted, len(raw),
+    "yes" if ok else "NO"))
+if not ok:
+    why = []
+    if not present: why.append("the text is not in the head")
+    if not advanced: why.append("current_rev did not advance")
+    print("  %s — the write returned 2xx but the doc is not what you meant. "
+          "Read it before writing again." % "; ".join(why))
+sys.exit(0 if ok else 1)
+'
