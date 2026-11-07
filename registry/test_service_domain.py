@@ -1,3 +1,4 @@
+# Clean-root deployment round-trip check; test behaviour is unchanged.
 """The service domain comes from the instance's config, not a hard-coded default.
 
 A route or service that names no domain is routed under SAMCLOUD_DOMAIN, or
