@@ -2,6 +2,15 @@
 
 What each release changed.
 
+## 2026-11-24 — The skill covers enrolment and identities; the API index lists every route
+
+- **No skill page named how a machine or an account joins the plane, how a service is published, or how an identity is added** (ticket #1048). Bringing Obelisk on, four seats improvised a device-scope grant, a hand-made `POST /devices` and a gateway key pasted in through sudo, and the grant would have given a shell on Sam's login. Of 186 routes, 98 were named in a skill page and 121 in `GET /api/v1/`; 48 were in neither, `/enroll` and `/bootstrap/{token}` among them.
+- **`tools.md` 3.20.0:** *Bring a machine or an account onto the plane* (`POST /enroll`, the bootstrap command run as the target account, the gateway check, retoken, pending, and what `device:<id>` grants; enrolling takes the editor role). *Register a service*, from 3.19.0, gains what this pass had written as *Publish a service*: the id is `<device_id>/<name>`, `guide_url`, the check from outside before sharing the URL, and health, update and delete. It also corrects 3.19.0's "a route only through a tunnel": a `direct-ssh` device is routed to its `outbound_ip`, and only a device with neither a tunnel nor an address gets no working route (`register_service`'s Caddy target).
+- **`auth.md` 3.3.0:** *Add an identity* (invite, activate, the briefing, who may invite with what, an identity with no scopes, ending a token). Its invite example names the group in `scopes`, as `group_roles` requires.
+- **`SKILL.md` 3.14.0:** the table routes "bring a machine or an account onto the plane, register a service" to `tools.md`, and "add an identity" to `auth.md`.
+- **`GET /api/v1/` lists every route a seat calls:** enrolment and bootstrap, device helpers, gateway admin, ports, skills, `helpers/{name}`, audit, views, group member and device edits, `regenerate-token`, doc watchers, `POST /services/register` and `POST /probe`. `POST /services` describes its answer, including the `service_token`. `users` had the key `briefing` twice, so `GET /users/brief/{token}` was never listed; it is `invite_briefing` now.
+- **`sandbox/docs_coverage.py` fails on a route that is neither in `GET /api/v1/` nor in `INTERNAL_ROUTES`** (the rail's claims, presence, beacon and `notifications/seen`, each with its reason), and on an internal entry that names no served route.
+
 ## 2026-11-24 — The skill says a seat can register its own environment and use services
 
 - Hermes seats had gateway reach that their scopes allowed but didn't use it: nothing in the skill's front page said that the environment a seat runs in can be registered with its own token (ticket 1143).

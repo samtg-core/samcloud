@@ -237,6 +237,47 @@ def state_lists():
     return out
 
 
+# Routes deliberately left out of GET /api/v1/ — plumbing a served helper calls
+# for the reader, never a call a seat makes by hand. Every other route must be
+# in the index, so a new route fails here until it is listed or named below.
+# (method, path as decorated, reason)
+INTERNAL_ROUTES = [
+    ("GET", "/api/v1/", "the index itself"),
+    ("POST", "/api/v1/tickets/{ticket_id}/claim", "the rail's thread claim"),
+    ("DELETE", "/api/v1/tickets/{ticket_id}/claim", "the rail's thread claim"),
+    ("POST", "/api/v1/tasks/{task_id}/claim", "the rail's thread claim"),
+    ("DELETE", "/api/v1/tasks/{task_id}/claim", "the rail's thread claim"),
+    ("POST", "/api/v1/docs/{doc_id}/claim", "the rail's thread claim"),
+    ("DELETE", "/api/v1/docs/{doc_id}/claim", "the rail's thread claim"),
+    ("GET", "/api/v1/wake/claims", "the rail's thread claims"),
+    ("POST", "/api/v1/wake/claims/refresh", "the rail's thread claims"),
+    ("POST", "/api/v1/wake/claims/release", "the rail's thread claims"),
+    ("POST", "/api/v1/wake/beacon", "the listener's report when its stream is dark"),
+    ("GET", "/api/v1/presence", "the rail's defer check"),
+    ("POST", "/api/v1/presence", "the rail's defer check"),
+    ("DELETE", "/api/v1/presence/{username}", "the rail's defer check"),
+    ("POST", "/api/v1/notifications/seen", "the subscriber's soft lease on surfaced rows"),
+]
+
+
+def api_index_gaps():
+    """Routes served but neither in GET /api/v1/ nor in INTERNAL_ROUTES, and
+    INTERNAL_ROUTES entries that name no served route. Both read from main.py:
+    the decorators for what is served, api_index() for what is listed."""
+    body = read(MAIN_PY)
+    norm = lambda p: re.sub(r"\{[^}]+\}", "{}", p.split("?")[0])
+    served = {(m.group(1).upper(), m.group(2)) for m in re.finditer(
+        r'@app\.(get|post|put|patch|delete)\("(/api/v1/[^"]*)"', body)}
+    start = body.find("def api_index")
+    end = body.find("\n@app", start)
+    listed = {norm(p) for p in re.findall(r'"path": "([^"]+)"', body[start:end])}
+    internal = {(m, p) for m, p, _ in INTERNAL_ROUTES}
+    unlisted = sorted((m, p) for m, p in served
+                      if norm(p) not in listed and (m, p) not in internal)
+    stale = sorted(internal - served)
+    return unlisted, stale
+
+
 def route_groups():
     """Top-level API groups actually served, from the FastAPI decorators."""
     body = read(MAIN_PY)
@@ -370,6 +411,18 @@ def main():
         if missing:
             warnings.append(
                 "ROUTE GROUPS not in samcloud skill: " + ", ".join(missing))
+
+    # 4b. Every route is discoverable from GET /api/v1/, or named as internal.
+    unlisted, stale = api_index_gaps()
+    if unlisted:
+        failures.append(
+            "ROUTES NOT IN GET /api/v1/: " + ", ".join(f"{m} {p}" for m, p in unlisted)
+            + " — add each to api_index() in registry/main.py, or to INTERNAL_ROUTES "
+              "here with the reason a seat never calls it")
+    if stale:
+        failures.append(
+            "INTERNAL_ROUTES names routes that are not served: "
+            + ", ".join(f"{m} {p}" for m, p in stale))
 
     # 5. Top-level subsystems (a dir with its own code) should be mentioned.
     for d in sorted(ROOT.iterdir()):

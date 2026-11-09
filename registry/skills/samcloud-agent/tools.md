@@ -1,4 +1,4 @@
-<!-- SKILL_VERSION: 3.19.1 -->
+<!-- SKILL_VERSION: 3.20.0 -->
 # tools — the API, the write tool, the helpers, the machines
 
 ## The API
@@ -295,6 +295,29 @@ Clear the pin only when you know why the key changed — a device rebuilt or
 re-keyed on purpose. The next hop pins what it then presents. The first hop to a
 device with no pin records its key and needs nobody.
 
+## Bring a machine or an account onto the plane
+
+A *device* is one account on one machine that the gateway can log in as. Make the OS account first: one for each seat or service, separate from anyone's own login.
+
+```
+POST /enroll {"device_id": "studio-services", "access_target": "direct-ssh",
+              "target_ip": "192.168.1.50", "target_ssh_user": "studio-services",
+              "group_ids": ["work"]}
+```
+
+The answer carries `bootstrap_command`, `curl -s __API__/bootstrap/<token> | bash`: one use, one hour. Run it once on the machine, signed in as `target_ssh_user`. It installs the gateway's key, pins the machine's host key, starts the tunnel for a `reverse-tunnel` device, writes the device token to `~/.config/samcloud/device_token`, and activates the device. A Windows machine takes `…/bootstrap/<token>/ps1`.
+
+`access_target` is how the gateway reaches the account: `direct-ssh` to `target_ip` on the LAN, or `reverse-tunnel`, where the machine dials out and the answer names its `tunnel_port`. Enrolling takes the editor role: the device joins the `group_ids` you name, each one a group you edit, or else every group you edit. The admin can enroll into any group.
+
+```
+ssh samcloud "studio-services -- id"         the gateway reaches it, as target_ssh_user
+GET  /devices/studio-services/guide          its route, services, and how to grant access
+POST /enroll/studio-services/retoken         a fresh bootstrap token: a retry, or a re-key after a rebuild
+GET  /enroll/pending                         enrolled, never activated (admin)
+```
+
+`device:<id>` lets a seat manage the device, and it is also that seat's way in through the gateway, as `target_ssh_user`. Give it only to a seat that should have that shell.
+
 ## Find and call a service
 
 In each entry of `GET /services`:
@@ -311,7 +334,7 @@ A service is something you run on a machine that others call. Register it so cal
 
 **You can register it yourself** on a device you manage: one whose group you are an editor of (`GET /groups/{id}` lists its devices), or your own device scope. Anything else is the admin's.
 
-**For a public route, pick a device with a tunnel.** `GET /devices/{id}` shows `outbound_method: "reverse-tunnel"` and a `tunnel_port`. The plane builds a route only through a tunnel: a service on a device without one is registered, but nobody can reach it. Several accounts on one machine often share one tunnelled device (`wafer-services` on wafer, for example), and a service listening on the machine's loopback is reachable through it, whichever account runs it.
+**For a public route, the plane has to reach the device.** `GET /devices/{id}` shows how. On a `reverse-tunnel` device (with a `tunnel_port`) the route goes through the tunnel, so the service listens on `127.0.0.1`. Several accounts on one machine often share one tunnelled device (`wafer-services` on wafer, for example), and a service on the machine's loopback is reachable through it, whichever account runs it. On a `direct-ssh` device the route goes to its `outbound_ip`, so the service listens on that LAN address. A device with neither (no tunnel and no address) is registered but gets no working route.
 
 ```
 curl -s -H @"$HOME/.samcloud/token.hdr" -H 'Content-Type: application/json' \
@@ -321,11 +344,18 @@ curl -s -H @"$HOME/.samcloud/token.hdr" -H 'Content-Type: application/json' \
     "capabilities": ["…"]}'
 ```
 
-- **One call does the whole route.** With a `subdomain`, the same call sets up the forward through the tunnel, the Caddy site and the DNS record. The reply has a `route` object with `forward`, `caddy`, `dns` and `verified`. Read each one: `"success": false` means that step failed, and the service is not reachable yet. A subdomain someone else has is `409`.
-- **The reply carries the service's own token,** `service_token`. Keep it like your own token (a `0600` file, never in a command line). The service uses it to report health, `POST /services/{id}/health`, every few minutes. That keeps it `online` in `GET /services`.
+- **One call does the whole route.** The id is `<device_id>/<name>`; send no `id`. With a `subdomain`, the same call sets up the forward (on a tunnelled device), the Caddy site and the DNS record. The reply has a `route` object with `forward`, `caddy`, `dns` and `verified`. Read each one: `"success": false` means that step failed, and the service is not reachable yet. A subdomain someone else has is `409`.
+- **The reply carries the service's own token,** `service_token`. Keep it like your own token (a `0600` file, never in a command line). The service uses it to report health, `POST /services/{id}/health`, every few minutes. That keeps it `online` in `GET /services`. `guide_url` is its operations page, `GET /services/{id}/guide`, read with the same token.
 - **Name the `subdomain` when you register.** `PATCH /services/{id}` can't add one or change the device. To move a service, register it again on the right device, switch the health reports to the new token, then `DELETE /services/{old id}`.
+- **Before you share the URL,** call it from outside with no token: every route that needs sign-in answers `401`.
 - **Who sees it:** the groups that hold its device. Put in the `description` how to call it, so callers don't have to ask you.
 - When a service takes compute for its callers, `queue.md` has what it owes the queue.
+
+```
+POST   /services/{id}/health      with the service token: marks it online
+PATCH  /services/{id}             port, description, health_endpoint, version, capabilities
+DELETE /services/{id}             the service, its route, its DNS record and its token
+```
 
 ## Threads
 
