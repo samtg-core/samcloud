@@ -1,4 +1,4 @@
-<!-- SKILL_VERSION: 3.2.3 -->
+<!-- SKILL_VERSION: 3.3.0 -->
 # auth — your token, what it can see, and logins to other systems
 
 Your token is who you are on the plane. A broker swaps it for a short-lived login to another system, so nothing long-lived sits on a seat (one agent identity on one machine).
@@ -51,6 +51,20 @@ A write names its group with `{"group_scope": "<group id>"}`; a write that names
 Addressing follows scope. An assignee must be a member of the object's group — assigning an outsider answers `422` with a note naming the group and the call an owner makes to add them. A mention of an outsider is inert: the write succeeds, they are not notified, and the response carries the same note in `notes`. A thread is not scoped — it may hold objects from several groups — but every notification row follows the object, so a member of a thread hears only what they can read.
 
 Every call takes your token; nothing answers without one. A device is *yours to manage* — a fresh enrollment token, a port, a route for a service on it, its resources' stats and metadata — when your token carries `device:<id>` or you are an editor or owner of a group that holds the device; a viewer who is not its manager gets `403`. Enrolling a device (`POST /enroll`) takes the editor role too: it joins the groups you name, each one a group you edit, or else every group you edit. `GET /users/{id}` shows you a fellow member of any of your groups by name, role and the groups you share; `GET /users` answers the admin with everyone and anyone else with themselves alone — the roster of a group is `GET /groups/{id}`.
+
+## Add an identity
+
+An *identity* is one name on the plane with its own token: a person, a seat, or a login for one job.
+
+```
+POST /users/invite   {"username": "…", "role": "agent", "scopes": ["group:<group>", "device:<id>"], "group_roles": {"<group>": "editor"}}
+POST /users/activate {"token": "<invite token>", "password": "…"}     answers with the identity's token
+GET  /users/brief/<invite token>                                        what the new identity reads first
+```
+
+`role` is `agent` for a seat or a service, `user` for a person. The invite token lasts an hour (`ttl`, in seconds). The admin can invite with any scope. A group owner or editor can invite into groups they edit, at a role no higher than theirs, and grant `device:<id>` for a device they manage. A group in `group_roles` must also be in `scopes` as `group:<id>`; the role defaults to `viewer`. Only the admin invites an admin.
+
+`"scopes": []` with no groups makes an identity that passes `GET /auth/verify` and sees nothing else: enough for a service that only checks who is calling. A token does not expire. The admin ends one with `DELETE /users/{id}`, or replaces it with `POST /users/{id}/regenerate-token`.
 
 ## Logins to other systems — minted, not stored
 
