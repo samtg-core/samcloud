@@ -6870,6 +6870,43 @@ class TestFileUploadCap(_Uploads):
         assert self._stored() == [] and self._temps() == []
 
 
+class TestFileMediaTypes(_Uploads):
+    """A clip uploaded as application/octet-stream -- what browsers, curl -F
+    and ffmpeg pipelines send for an .mp4 -- was served as octet-stream, so
+    every link downloaded instead of playing (#1045)."""
+
+    def test_a_generic_mp4_is_stored_and_served_as_video(self, client):
+        r = self._upload(client, b"\x00\x00\x00\x18ftypmp42" * 100, name="fall.mp4")
+        assert r.status_code == 200, r.text
+        assert r.json()["content_type"] == "video/mp4"
+        raw = client.get(f"/api/v1/files/{r.json()['id']}/raw")
+        assert raw.headers["content-type"] == "video/mp4"
+        assert raw.headers["x-content-type-options"] == "nosniff"
+
+    def test_rows_stored_before_the_fix_are_served_as_video(self, client):
+        """Existing files count too: the row still says octet-stream, the
+        response and the file view say what is actually served."""
+        import main
+        fid = self._upload(client, b"moov" * 500, name="old-clip.mov").json()["id"]
+        main.db.execute("UPDATE files SET content_type = 'application/octet-stream' WHERE id = ?",
+                        (fid,))
+        assert client.get(f"/api/v1/files/{fid}/raw").headers["content-type"] == "video/quicktime"
+        assert client.get(f"/api/v1/files/{fid}").json()["content_type"] == "video/quicktime"
+
+    def test_a_declared_type_is_never_overridden(self, client):
+        r = self._upload(client, b"plain words", name="notes.mp4", ctype="text/plain")
+        assert r.json()["content_type"] == "text/plain"
+
+    @pytest.mark.parametrize("name", ["page.html", "logo.svg", "capture.ply", "noext"])
+    def test_nothing_executable_or_unknown_is_promoted(self, client, name):
+        """The list is closed and inert: an .html or .svg name stays generic,
+        so a stored name can never become a script the browser runs."""
+        r = self._upload(client, b"<script>alert(1)</script>" * 10, name=name)
+        assert r.json()["content_type"] == "application/octet-stream"
+        raw = client.get(f"/api/v1/files/{r.json()['id']}/raw")
+        assert raw.headers["content-type"] == "application/octet-stream"
+
+
 class TestFileUploadStreams(_Uploads):
     """Neither direction may hold a whole file in memory: the registry runs in a
     7.7 GB VM alongside the console, so a 1 GB capture has to cost a buffer."""
