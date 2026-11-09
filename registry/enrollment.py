@@ -369,55 +369,78 @@ def generate_access_keypair(username: str, device_name: str) -> dict:
     }
 
 
-def generate_pair_token(username: str, device_name: str, ttl_seconds: int = 3600) -> str:
+# A pair code is the short, typeable form of a pair link: a device that cannot
+# scan a QR (a headset) opens /p/<code> by hand. No 0/O, 1/I/L or U; 30^8 is
+# about 2^39, against a link that lives an hour and spends on first use.
+PAIR_CODE_ALPHABET = "ABCDEFGHJKMNPQRSTVWXYZ23456789"
+PAIR_CODE_LENGTH = 8
+
+
+def normalize_pair_code(code: str) -> str:
+    """Upper-case and drop separators, so `k7qm-2xhd` and `K7QM2XHD` are one code."""
+    return "".join(ch for ch in (code or "").upper() if ch.isalnum())
+
+
+def generate_pair_token(username: str, device_name: str, ttl_seconds: int = 3600) -> tuple[str, str]:
     """Create a single-use pair token: a link that mints one access key.
 
     An access route (a phone or laptop) has no samcloud token of its own, so it
     cannot call POST /access-keys/setup-script. A signed-in user mints this token
     for themselves (or an admin for anyone) and runs `curl <pair_url> | bash` on
-    the new device. Type 'pair' is not accepted by verify_token, so the token
-    authenticates nothing else. Minting again for the same user+device replaces it.
+    the new device. Types 'pair' and 'pair_code' are not accepted by
+    verify_token, so neither authenticates anything else. Minting again for the
+    same user+device replaces both.
 
     Returns:
-        Plaintext token string (sc_pair_...)
+        (token, code): the plaintext token (sc_pair_...) and its short code.
+        Redeeming either spends both.
     """
     token = _random_token("sc_pair_")
-    token_hash = _hash_token(token)
-    token_id = f"pair:{username}@{device_name}"
+    code = "".join(secrets.choice(PAIR_CODE_ALPHABET) for _ in range(PAIR_CODE_LENGTH))
+    key_id = f"{username}@{device_name}"
+    scopes = json.dumps({"device": device_name})
     expires_at = (datetime.now(timezone.utc) + timedelta(seconds=ttl_seconds)).isoformat()
 
     with db.transaction() as conn:
-        conn.execute("DELETE FROM tokens WHERE id = ?", (token_id,))
+        conn.execute("DELETE FROM tokens WHERE id IN (?, ?)", (f"pair:{key_id}", f"paircode:{key_id}"))
         conn.execute("""
             INSERT INTO tokens (id, token_hash, type, owner_id, scopes, expires_at)
-            VALUES (?, ?, 'pair', ?, ?, ?)
-        """, (token_id, token_hash, username,
-              json.dumps({"device": device_name}), expires_at))
+            VALUES (?, ?, 'pair', ?, ?, ?), (?, ?, 'pair_code', ?, ?, ?)
+        """, (f"pair:{key_id}", _hash_token(token), username, scopes, expires_at,
+              f"paircode:{key_id}", _hash_token(code), username, scopes, expires_at))
 
-    db.audit(f"user:{username}", "token.pair.created", f"{username}@{device_name}",
+    db.audit(f"user:{username}", "token.pair.created", key_id,
              {"ttl_seconds": ttl_seconds})
 
-    return token
+    return token, code
 
 
 def redeem_pair_token(token: str) -> dict | None:
-    """Spend a pair token. Single-use: deleted on the first redeem, valid or expired.
+    """Spend a pair token or its short code. Single-use: the first redeem,
+    valid or expired, deletes the token and its code together.
 
     Returns:
         {"username", "device_name"} if valid, None otherwise.
     """
-    if not token or not token.startswith("sc_pair_"):
+    if not token:
         return None
+    if token.startswith("sc_pair_"):
+        token_hash, token_type = _hash_token(token), "pair"
+    else:
+        code = normalize_pair_code(token)
+        if len(code) != PAIR_CODE_LENGTH:
+            return None
+        token_hash, token_type = _hash_token(code), "pair_code"
 
-    token_hash = _hash_token(token)
     with db.transaction() as conn:
         record = conn.execute(
-            "SELECT * FROM tokens WHERE token_hash = ? AND type = 'pair'",
-            (token_hash,),
+            "SELECT * FROM tokens WHERE token_hash = ? AND type = ?",
+            (token_hash, token_type),
         ).fetchone()
         if not record:
             return None
-        conn.execute("DELETE FROM tokens WHERE id = ?", (record["id"],))
+        key_id = record["id"].split(":", 1)[1]
+        conn.execute("DELETE FROM tokens WHERE id IN (?, ?)", (f"pair:{key_id}", f"paircode:{key_id}"))
 
     record = dict(record)
     if record.get("expires_at"):

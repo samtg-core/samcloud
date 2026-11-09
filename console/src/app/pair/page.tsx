@@ -2,6 +2,7 @@
 
 import { useState, useEffect, Suspense } from 'react';
 import { useSearchParams } from 'next/navigation';
+import { QrCode } from '@/components/QrCode';
 
 function CopyButton({ text, label }: { text: string; label?: string }) {
   const [copied, setCopied] = useState(false);
@@ -31,7 +32,7 @@ function PairForm() {
   } | null>(null);
   const [downloaded, setDownloaded] = useState(false);
   const [showBrowser, setShowBrowser] = useState(false);
-  const [link, setLink] = useState<{ pair_command: string; expires_in: number } | null>(null);
+  const [link, setLink] = useState<{ pair_command: string; code: string; code_url: string; expires_in: number } | null>(null);
   const [linking, setLinking] = useState(false);
 
   useEffect(() => {
@@ -220,11 +221,25 @@ function PairForm() {
           </div>
         )}
         {link && (
-          <div className="rounded-lg border border-blue-500/20 bg-blue-500/5 p-4 space-y-3">
-            <p className="text-sm text-blue-400 font-medium">Run on the device you want to connect from:</p>
-            <div className="flex items-center gap-2">
-              <code className="flex-1 text-sm font-mono text-zinc-200 break-all">{link.pair_command}</code>
-              <CopyButton text={link.pair_command} />
+          <div className="rounded-lg border border-blue-500/20 bg-blue-500/5 p-4 space-y-4">
+            <div className="flex flex-col sm:flex-row items-center gap-4">
+              <QrCode text={link.code_url} />
+              <div className="space-y-2 text-sm text-zinc-400">
+                <p className="text-blue-400 font-medium">On the new device, scan this</p>
+                <p>or open</p>
+                <div className="flex items-center gap-2">
+                  <code className="font-mono text-zinc-200 break-all">{link.code_url.replace(/^https?:\/\//, '')}</code>
+                  <CopyButton text={link.code_url} />
+                </div>
+                <p>then copy the command it shows and paste it into a terminal there.</p>
+              </div>
+            </div>
+            <div className="border-t border-zinc-800 pt-3 space-y-2">
+              <p className="text-xs text-zinc-500">Or run this on the device directly:</p>
+              <div className="flex items-center gap-2">
+                <code className="flex-1 text-xs font-mono text-zinc-300 break-all">{link.pair_command}</code>
+                <CopyButton text={link.pair_command} />
+              </div>
             </div>
             <p className="text-xs text-zinc-500">
               Generates a keypair, installs it and configures SSH in one step. Works once, within {Math.round(link.expires_in / 60)} minutes.

@@ -304,8 +304,8 @@ curl -s -X POST "${H[@]}" "$PLANE/enroll" -H 'Content-Type: application/json' \
 |---|---|---|---|
 | POST | `/api/v1/access-keys` | self or admin | `{username, device_name}`: generate a gateway keypair; returns the private key once. Your own username, or anyone's as admin |
 | POST | `/api/v1/access-keys/setup-script` | self or admin | The same, as a bash script that installs the key and the `samcloud` SSH host |
-| POST | `/api/v1/access-keys/pair` | self or admin | A single-use pair link (one hour) for a device with no samcloud token; answers a `pair_command` to run on that device |
-| GET | `/api/v1/pair/{token}` | the link | Spend a pair link: mint the key and serve its setup script; `410` once used or expired |
+| POST | `/api/v1/access-keys/pair` | self or admin | A single-use pair link (one hour) for a device with no samcloud token; answers a `pair_command` to run on that device, and a short `code` with its `code_url` (the console page `/p/<code>`, drawn as a QR on `/pair`) and `code_command` |
+| GET | `/api/v1/pair/{token}` | the link | Spend a pair link, given its `sc_pair_` token or its short code: mint the key and serve its setup script; `410` once used or expired. Either form spends both |
 | GET | `/api/v1/access-keys` | self or admin | Access keys (public halves only): your own, or all as admin (`?username=`) |
 | DELETE | `/api/v1/access-keys/{key_id}` | self or admin | Revoke a key: your own, or any as admin |
 
