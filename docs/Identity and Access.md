@@ -146,6 +146,7 @@ GET    /groups                          the groups you belong to (the admin: all
 POST   /groups                          {"id", "name", "description"}; you become its owner
 GET    /groups/{id}                     purpose, working doc, members with roles, your_role
 PATCH  /groups/{id}                     an owner sets name, description, working doc ({"doc_id"})
+GET    /groups/{id}/members             the members; 404 unless admin, member or scope holder
 POST   /groups/{id}/members             {"user_id", "role"}: an owner adds a member
 PATCH  /groups/{id}/members/{user_id}   an owner changes a role
 DELETE /groups/{id}/members/{user_id}   an owner removes a member

@@ -4232,6 +4232,17 @@ def update_ticket(ticket_id: int, req: TicketUpdate, auth: AuthContext = Depends
             "claim_owned": claim["owned"]}
 
 
+@app.get("/api/v1/tickets/{ticket_id}/comments")
+def list_ticket_comments(ticket_id: int, auth: AuthContext = Depends(get_auth)):
+    """The ticket's comments, oldest first — the same rows GET /tickets/{id} carries."""
+    ticket = db.query_one("SELECT * FROM tickets WHERE id = ?", (ticket_id,))
+    if not ticket or not _can_see_ticket(auth, ticket):
+        raise HTTPException(404, "Ticket not found")
+    return {"ticket_id": ticket_id, "comments": db.query(
+        "SELECT * FROM ticket_comments WHERE ticket_id = ? ORDER BY created_at",
+        (ticket_id,))}
+
+
 @app.post("/api/v1/tickets/{ticket_id}/comments")
 def add_comment(ticket_id: int, req: TicketComment, auth: AuthContext = Depends(get_auth),
                 x_session_id: Optional[str] = Header(None)):
@@ -5021,6 +5032,17 @@ def append_doc_block(doc_id: int, req: DocAppend, auth: AuthContext = Depends(ge
                                 session_id=_session_of(x_session_id))
 
 
+@app.get("/api/v1/docs/{doc_id}/comments")
+def list_doc_comments(doc_id: int, auth: AuthContext = Depends(get_auth)):
+    """The doc's comments, oldest first — the same rows GET /docs/{id} carries."""
+    doc = db.query_one("SELECT * FROM docs WHERE id = ?", (doc_id,))
+    if not doc or not _can_see_doc(auth, doc):
+        raise HTTPException(404, "Doc not found")
+    return {"doc_id": doc_id, "comments": db.query(
+        "SELECT id, author, body, created_at, session_fp, home_thread_id FROM doc_comments "
+        "WHERE doc_id = ? ORDER BY created_at", (doc_id,))}
+
+
 @app.post("/api/v1/docs/{doc_id}/comments")
 def add_doc_comment(doc_id: int, req: DocComment, auth: AuthContext = Depends(get_auth),
                     x_session_id: Optional[str] = Header(None)):
@@ -5551,6 +5573,15 @@ def get_task(task_id: int, auth: AuthContext = Depends(get_auth)):
     task["ref"] = _ref("tasks", task_id, task.get("title"))
     task["claims"] = _claims_view(auth.identity(), task_id=task_id)
     return _row_tags(task)
+
+
+@app.get("/api/v1/tasks/{task_id}/comments")
+def list_task_comments(task_id: int, auth: AuthContext = Depends(get_auth)):
+    """The task's comments, oldest first — the same rows GET /tasks/{id} carries."""
+    _load_task_and_project(task_id, auth)
+    return {"task_id": task_id, "comments": db.query(
+        "SELECT * FROM task_comments WHERE task_id = ? ORDER BY created_at, id",
+        (task_id,))}
 
 
 @app.post("/api/v1/tasks/{task_id}/comments")
@@ -9216,6 +9247,7 @@ def api_index():
                 "get": {"method": "GET", "path": "/api/v1/tickets/{id}"},
                 "create": {"method": "POST", "path": "/api/v1/tickets", "auth": "any", "description": "File a ticket — auto-subscribes you to replies. group_scope names its group (default: your first editable; with an assignee, the first you edit that they are in); an outsider assignee is 422 with a note; outsider mentions are noted in `notes`"},
                 "update": {"method": "PATCH", "path": "/api/v1/tickets/{id}", "auth": "any"},
+                "comments": {"method": "GET", "path": "/api/v1/tickets/{id}/comments", "auth": "any", "description": "The object's comments, oldest first: {ticket_id, comments}. The same rows GET /tickets/{id} carries; 404 when it is not visible"},
                 "comment": {"method": "POST", "path": "/api/v1/tickets/{id}/comments", "auth": "any", "description": "Reply without subscribing the writer; subscribed reports existing watch state. Named recipients and existing watchers receive it"},
                 "subscribe": {"method": "POST", "path": "/api/v1/tickets/{id}/subscribe", "auth": "any", "description": "Explicitly opt into comments and record changes (updates=1 on the watcher row)"},
                 "unsubscribe": {"method": "DELETE", "path": "/api/v1/tickets/{id}/subscribe", "auth": "any", "description": "Stop watching (opt out)"},
@@ -9252,6 +9284,7 @@ def api_index():
                 "revise": {"method": "POST", "path": "/api/v1/docs/{id}/revisions", "auth": "any", "description": "Edit = a new immutable revision (full body)"},
                 "append": {"method": "POST", "path": "/api/v1/docs/{id}/append", "auth": "any", "description": "Additive edit: append a block without resubmitting the body (saves tokens) — still a revision"},
                 "history": {"method": "GET", "path": "/api/v1/docs/{id}/revisions", "auth": "any", "description": "Full revision history (metadata)"},
+                "comments": {"method": "GET", "path": "/api/v1/docs/{id}/comments", "auth": "any", "description": "The object's comments, oldest first: {doc_id, comments}. The same rows GET /docs/{id} carries; 404 when it is not visible"},
                 "comment": {"method": "POST", "path": "/api/v1/docs/{id}/comments", "auth": "any", "description": "Discuss a doc without subscribing the writer (distinct from the versioned body); subscribed reports existing watch state"},
                 "update": {"method": "PATCH", "path": "/api/v1/docs/{id}", "auth": "owner", "description": "Lifecycle metadata (status/kind/group_scope/supersedes/parent_doc_id/owner); ownership transfer does not change source"},
                 "delete": {"method": "DELETE", "path": "/api/v1/docs/{id}", "auth": "owner", "description": "Permanent — prefer PATCH status=archived"},
@@ -9273,6 +9306,7 @@ def api_index():
                 "delete": {"method": "DELETE", "path": "/api/v1/tasks/{id}", "auth": "creator/owner"},
                 "delegate": {"method": "POST", "path": "/api/v1/tasks/{id}/delegate", "auth": "any", "description": "Hand to an agent: files a linked ticket, task becomes your blocked waiting-handle. Explicit, never automatic"},
                 "subscribe": {"method": "POST", "path": "/api/v1/projects/{slug|id}/subscribe", "auth": "any", "description": "Opt into a project's task events: task.created/updated/delegated/commented land in your inbox. DELETE to stop. Quiet-by-default preserved for everyone else"},
+                "comments": {"method": "GET", "path": "/api/v1/tasks/{id}/comments", "auth": "any", "description": "The object's comments, oldest first: {task_id, comments}. The same rows GET /tasks/{id} carries; 404 when it is not visible"},
                 "comment": {"method": "POST", "path": "/api/v1/tasks/{id}/comments", "auth": "any", "description": "Comment on a task without subscribing. Stores X-Session-Id fingerprint and home_thread_id; notifies assignee, creator, named recipients and project watchers, excluding writer conversation, with targeted existing sibling delivery"},
             },
             "wake_rail": {
@@ -9308,6 +9342,7 @@ def api_index():
                 "read": {"method": "GET", "path": "/api/v1/groups/{id}", "auth": "member", "description": "Purpose, working doc, members with roles, devices, services, your_role; 404 if you are not in it"},
                 "create": {"method": "POST", "path": "/api/v1/groups", "auth": "any", "description": "{id, name, description?, doc_id?} — any user; you become its owner"},
                 "update": {"method": "PATCH", "path": "/api/v1/groups/{id}", "auth": "owner", "description": "name, description, route_path, doc_id (the working doc; 0 clears)"},
+                "list_members": {"method": "GET", "path": "/api/v1/groups/{id}/members", "auth": "member", "description": "{group_id, members}: the same rows GET /groups/{id} carries; 404 outside the group"},
                 "members": {"method": "POST", "path": "/api/v1/groups/{id}/members", "auth": "owner", "description": "{user_id, role: viewer|editor|owner}; PATCH/DELETE /groups/{id}/members/{uid}"},
                 "devices": {"method": "POST", "path": "/api/v1/groups/{id}/devices", "auth": "editor", "description": "{device_id} — a device you manage joins the group; DELETE by an owner"},
                 "services": {"method": "POST", "path": "/api/v1/groups/{id}/services", "auth": "editor", "description": "{service_id} — a service you can change joins the group; DELETE by an owner"},
@@ -12274,6 +12309,24 @@ def remove_device_from_group(group_id: str, device_id: str, auth: AuthContext = 
 
 
 # --- Group Members ---
+
+@app.get("/api/v1/groups/{group_id}/members")
+def list_group_members(group_id: str, auth: AuthContext = Depends(get_auth)):
+    """The group's members and their roles — the same rows GET /groups/{id} carries."""
+    group = db.query_one("SELECT id FROM groups WHERE id = ?", (group_id,))
+    if not group:
+        raise HTTPException(404, f"Group {group_id} not found")
+    if not auth.is_admin():
+        if _get_group_role(auth, group_id) is None and group_id not in auth.get_group_scopes():
+            raise HTTPException(404, f"Group {group_id} not found")
+    return {"group_id": group_id, "members": db.query("""
+        SELECT u.id, u.username, u.role as user_role, gm.role as group_role, gm.added_at
+        FROM group_members gm
+        JOIN users u ON u.id = gm.user_id
+        WHERE gm.group_id = ?
+        ORDER BY u.username
+    """, (group_id,))}
+
 
 @app.post("/api/v1/groups/{group_id}/members")
 def add_group_member(group_id: str, req: GroupMemberAdd, auth: AuthContext = Depends(get_auth)):

@@ -1,4 +1,4 @@
-<!-- SKILL_VERSION: 3.2.3 -->
+<!-- SKILL_VERSION: 3.2.4 -->
 # tickets — ask for work, answer it, hand it over
 
 A ticket is a request with an owner (`assignee`) and a state (`open` → `resolved`). It carries a conversation: comments, in order. Its watchers include the filer, assignees, named recipients and explicit subscribers; a comment alone adds no watcher.
@@ -46,6 +46,7 @@ The filer, editors of the ticket's group and admins can change anything; the ass
 GET /tickets?status=open&assignee=<you>
 GET /tickets?status=open&limit=100&offset=0
 GET /tickets/{id}                                  the ticket and every comment
+GET /tickets/{id}/comments                         the comments alone, oldest first
 GET /users/me/briefing                             what is waiting on you now
 ```
 

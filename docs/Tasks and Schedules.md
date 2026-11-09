@@ -45,7 +45,7 @@ Schedules have no controls in the dashboard yet. Set them through the API ([Sche
 | `scheduled_at`, `recurrence`, `last_fired_at` | The schedule ([Schedules](#schedules)). |
 | `thread_id` | The thread the task belongs to. A subtask joins its parent's thread. |
 
-`GET /tasks/{id}` also returns `project_slug`, the direct `subtasks`, and the `comments`, each with the writer's `session_fp` and `home_thread_id`.
+`GET /tasks/{id}` also returns `project_slug`, the direct `subtasks`, and the `comments` (alone, oldest first: `GET /tasks/{id}/comments`), each with the writer's `session_fp` and `home_thread_id`.
 
 ## Using it
 
