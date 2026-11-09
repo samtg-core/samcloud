@@ -3479,6 +3479,58 @@ class TestHolderRead:
         assert holders[0]["session"] == _session_fp_expected("triage-sess")
 
 
+class TestObjectCommentsRead:
+    """GET /{tickets,docs,tasks}/{id}/comments and GET /groups/{id}/members read
+    what POST writes. They answered 405, and a reader that ignored the status
+    saw no comments (#996)."""
+
+    def test_each_plane_lists_its_comments(self, client, tmp_db):
+        t = client.post("/api/v1/tickets", json={"type": "question", "summary": "cr host",
+                                                 "body": "x"}).json()["ticket_id"]
+        d = client.post("/api/v1/docs", json={"title": "cr doc", "body": "b"}).json()["doc_id"]
+        slug = client.post("/api/v1/projects", json={"name": "cr proj"}).json()["slug"]
+        k = client.post(f"/api/v1/projects/{slug}/tasks", json={"title": "t"}).json()["id"]
+        for plane, oid in (("tickets", t), ("docs", d), ("tasks", k)):
+            client.post(f"/api/v1/{plane}/{oid}/comments", json={"body": f"{plane} one"})
+            client.post(f"/api/v1/{plane}/{oid}/comments", json={"body": f"{plane} two"})
+            r = client.get(f"/api/v1/{plane}/{oid}/comments")
+            assert r.status_code == 200, plane
+            body = r.json()
+            assert body[f"{plane[:-1]}_id"] == oid
+            assert [c["body"] for c in body["comments"]] == [f"{plane} one", f"{plane} two"]
+            full = client.get(f"/api/v1/{plane}/{oid}").json()["comments"]
+            assert [c["id"] for c in full] == [c["id"] for c in body["comments"]]
+
+    def test_group_members_read_matches_group(self, client, tmp_db):
+        _create_group(client, "cr-members", "CR Members")
+        r = client.get("/api/v1/groups/cr-members/members")
+        assert r.status_code == 200
+        body = r.json()
+        assert body["group_id"] == "cr-members"
+        full = client.get("/api/v1/groups/cr-members").json()["members"]
+        assert body["members"] == full
+        assert client.get("/api/v1/groups/no-such-group/members").status_code == 404
+        app = _get_app()
+        with TestClient(app) as raw:
+            token, _ = _invite_and_activate(client, raw, "cr-member-outsider", [])
+            outsider = AuthedClient(raw, token)
+            assert outsider.get("/api/v1/groups/cr-members/members").status_code == 404
+
+    def test_missing_and_hidden_are_404(self, client, tmp_db):
+        for plane in ("tickets", "docs", "tasks"):
+            assert client.get(f"/api/v1/{plane}/999999/comments").status_code == 404
+        _create_group(client, "cr-group", "CR Group")
+        t = client.post("/api/v1/tickets", json={"type": "question", "summary": "hidden",
+                                                 "body": "x", "group_scope": "cr-group"}
+                        ).json()["ticket_id"]
+        client.post(f"/api/v1/tickets/{t}/comments", json={"body": "scoped"})
+        app = _get_app()
+        with TestClient(app) as raw:
+            token, _ = _invite_and_activate(client, raw, "cr-outsider", [])
+            outsider = AuthedClient(raw, token)
+            assert outsider.get(f"/api/v1/tickets/{t}/comments").status_code == 404
+
+
 class TestCommentFeed:
     """GET /comments — cross-plane watermark feed (#424: prose is write-once
     until something can re-read it cheaply)."""

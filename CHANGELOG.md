@@ -2,6 +2,12 @@
 
 What each release changed.
 
+## 2026-11-09 — Comments and group members can be read where they are written
+
+- `GET /api/v1/{tickets,docs,tasks}/{id}/comments` returns `{<plane>_id, comments}`, oldest first: the rows `GET /{plane}/{id}` carries, with the same visibility (404 when hidden). Only POST existed on these paths, so a reader got 405 and could mistake its body for an empty list.
+- `GET /api/v1/groups/{id}/members` returns `{group_id, members}`, visible to an admin, a member or a holder of the group's scope.
+- The API index, Tickets, Docs, Tasks and Schedules, Identity and Access and the tickets skill (3.2.4) list them.
+
 ## 2026-11-07 — The docs state the access rules as they are
 
 - The enrolment, device-manager, invite, route-activation and event-visibility rules read the same in the docs, the served skills (auth 3.2.3) and the `GET /api/v1/` index.

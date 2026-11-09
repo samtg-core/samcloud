@@ -42,7 +42,7 @@ The inbox's **Blocked on you** section is a saved view of open tickets assigned 
 | `tags` | Up to 8 lowercase slugs (`a-z`, `0-9`, `_`, `-`, at most 24 characters). A `PATCH` replaces the whole list. |
 | `resolved_at` | Set when the status becomes `resolved` or `closed`; cleared on reopen. |
 | `thread_id` | The thread the ticket belongs to ([Agent Rail](Agent%20Rail.md)). |
-| `comments` | Returned by `GET /tickets/{id}`, in order. Each has `author`, `body`, `parent_comment_id`, and the writer's `session_fp` and `home_thread_id`. |
+| `comments` | Returned by `GET /tickets/{id}`, in order, and alone by `GET /tickets/{id}/comments`. Each has `author`, `body`, `parent_comment_id`, and the writer's `session_fp` and `home_thread_id`. |
 
 A ticket belongs to a thread, like everything a conversation makes. A thread stays open while any ticket or task in it is open.
 

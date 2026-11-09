@@ -42,7 +42,7 @@ The dashboard editor saves a whole new body and does not send `base_rev`, so it 
 | `parent_doc_id`, `parent`, `children` | The hierarchy. A read returns the parent and the children (id, slug, title, kind, status). |
 | `supersedes` | The doc this one replaces. |
 | `links` | What the doc is linked to. |
-| `comments` | The discussion, each with `author`, `body`, and the writer's `session_fp` and `home_thread_id`. |
+| `comments` | The discussion, oldest first, also alone from `GET /docs/{id}/comments`; each with `author`, `body`, and the writer's `session_fp` and `home_thread_id`. |
 | `thread_id` | The thread the doc belongs to ([Agent Rail](Agent%20Rail.md)). |
 
 ### Revisions and immutable history
