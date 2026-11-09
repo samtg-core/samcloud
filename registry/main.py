@@ -12579,6 +12579,33 @@ def _file_type_ok(content_type: str) -> bool:
             or any(content_type.startswith(p) for p in FILE_ALLOWED_PREFIXES))
 
 
+# The generic type, named by its extension (#1045). Browsers, `curl -F`, ffmpeg
+# pipelines and most agents send application/octet-stream for an .mp4, so clips
+# were stored generic and every link downloaded instead of playing. For that one
+# type only, the filename's extension names the real one -- from a closed list
+# of media a browser renders inertly. Never text/html, SVG or anything else that
+# executes: a stored name must not become a script surface, which is what
+# `nosniff` on the raw route exists to keep shut. A declared specific type is
+# never overridden.
+FILE_MEDIA_TYPES_BY_EXT = {
+    ".mp4": "video/mp4", ".m4v": "video/mp4", ".mov": "video/quicktime",
+    ".webm": "video/webm",
+    ".gif": "image/gif", ".png": "image/png", ".jpg": "image/jpeg",
+    ".jpeg": "image/jpeg", ".webp": "image/webp",
+    ".mp3": "audio/mpeg", ".m4a": "audio/mp4", ".wav": "audio/wav",
+    ".ogg": "audio/ogg",
+}
+
+
+def _file_media_type(name, content_type) -> str:
+    """The type to store and serve: the declared one, unless it is the generic
+    fallback and the name's extension is a known inert media type."""
+    declared = content_type or "application/octet-stream"
+    if declared != "application/octet-stream":
+        return declared
+    return FILE_MEDIA_TYPES_BY_EXT.get(Path(name or "").suffix.lower(), declared)
+
+
 def _resolve_file_scope(auth: AuthContext, group_scope, current=None) -> str:
     """Write-side twin of the read predicate — one resolver for every kind (scope v1).
 
@@ -12641,6 +12668,8 @@ def _can_see_file(auth: AuthContext, f: dict) -> bool:
 
 def _file_view(f: dict) -> dict:
     f = dict(f)
+    # Rows stored before #1045 say octet-stream for a clip; report what is served.
+    f["content_type"] = _file_media_type(f.get("name"), f.get("content_type"))
     f["url"] = f"/api/v1/files/{f['id']}/raw"
     f["links"] = db.query(
         "SELECT id, target_type, target_id FROM file_links WHERE file_id = ?", (f["id"],))
@@ -12709,6 +12738,7 @@ async def upload_file(file: UploadFile = File(...), group_scope: str = Form(None
             writer.abort()
 
     name = os.path.basename(file.filename or sha)[:200]
+    ctype = _file_media_type(name, ctype)
     fid = db.execute(
         "INSERT INTO files (sha256, name, content_type, bytes, group_scope, owner) "
         "VALUES (?, ?, ?, ?, ?, ?)",
@@ -12774,7 +12804,9 @@ def get_file_raw(file_id: int, auth: AuthContext = Depends(get_auth)):
     # only synthesises that header when `filename` is given.
     return FileResponse(
         blobs.path(f["sha256"]),
-        media_type=f["content_type"],
+        # Existing rows count too (#1045): an .mp4 uploaded as octet-stream
+        # is served as video/mp4, so its link plays in the browser.
+        media_type=_file_media_type(f["name"], f["content_type"]),
         headers={"Content-Disposition": disposition,
                  "X-Content-Type-Options": "nosniff",
                  "Cache-Control": "private, max-age=3600"})

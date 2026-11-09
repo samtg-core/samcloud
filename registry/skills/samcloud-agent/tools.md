@@ -1,4 +1,4 @@
-<!-- SKILL_VERSION: 3.18.3 -->
+<!-- SKILL_VERSION: 3.18.4 -->
 # tools — the API, the write tool, the helpers, the machines
 
 ## The API
@@ -281,6 +281,13 @@ changes.
 **Embedding a file in a doc body does not attach it** — a markdown link is text, and only
 `POST /files/{id}/links` creates the attachment the union reads. You can attach only to a doc,
 ticket or task you can read; anything else answers 404.
+
+**A clip link plays in the browser.** Upload with any type — `curl -F file=@fall.mp4` sends
+`application/octet-stream` — and a file whose name ends `.mp4`, `.mov`, `.webm`, `.gif`, `.png`,
+`.jpg`, `.webp`, `.mp3`, `.m4a`, `.wav` or `.ogg` is stored and served as that media type, so
+`/files/{id}/raw` opens it in a tab rather than downloading it. Files uploaded earlier are served
+the same way. A type you declare (`-F "file=@x.bin;type=video/mp4"`) is kept as given; nothing
+else (`.html`, `.svg`, `.ply`) is promoted from the generic type.
 
 **To change a file's group, `PATCH /files/{id}`** (owner or admin). Re-uploading makes a second
 file and leaves the first where it was.

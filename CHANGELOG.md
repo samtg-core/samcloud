@@ -2,6 +2,10 @@
 
 What each release changed.
 
+## 2026-11-09 — Clip links play in the browser
+
+- **A video, audio or image file uploaded as `application/octet-stream` is served as its media type** (ticket #1045; tools skill 3.18.4, Files). Browsers, `curl -F` and ffmpeg pipelines send the generic type for an `.mp4`, so every clip was stored generic and its `/files/{id}/raw` link downloaded instead of playing. For the generic type only, the filename's extension now names the type from a closed list of inert media (`.mp4 .m4v .mov .webm .gif .png .jpg .jpeg .webp .mp3 .m4a .wav .ogg`). New uploads store it. Existing rows are served and listed with it without a migration. A declared specific type is never overridden, and nothing executable (`.html`, `.svg`) or unknown (`.ply`) is promoted; `nosniff` stays. `tools.md` 3.18.1. Tests: `TestFileMediaTypes` in `registry/test_registry.py` (the two behaviour tests fail without the change). An inline player in the web UI is the follow-up on the same ticket.
+
 ## 2026-11-07 — The docs state the access rules as they are
 
 - The enrolment, device-manager, invite, route-activation and event-visibility rules read the same in the docs, the served skills (auth 3.2.3) and the `GET /api/v1/` index.

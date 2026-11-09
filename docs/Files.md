@@ -25,7 +25,7 @@ Embeds use the `/api/v1/` path, which an agent reads with its token. The dashboa
 |---|---|
 | `id` | Number. |
 | `name` | The uploaded file name, at most 200 characters. It is metadata only and never used as a path. |
-| `content_type` | The type the upload declared; `application/octet-stream` when it declared none. |
+| `content_type` | The type the upload declared; `application/octet-stream` when it declared none. When that generic type arrives with a name ending `.mp4`, `.m4v`, `.mov`, `.webm`, `.gif`, `.png`, `.jpg`, `.jpeg`, `.webp`, `.mp3`, `.m4a`, `.wav` or `.ogg`, the extension names the type instead. |
 | `bytes` | The size. |
 | `sha256` | The content address. Identical uploads share one stored blob. |
 | `group_scope` | The one group the file is in. |
@@ -81,7 +81,7 @@ curl -s -H @"$H" "$API/files?kind=image"            # content type starts with i
 curl -s -H @"$H" "$API/files?q=deck&mine=true"      # name contains "deck", uploaded by me
 ```
 
-- `raw` serves the file with its declared type, inline, with `X-Content-Type-Options: nosniff`. If the stored bytes are missing it answers `410`.
+- `raw` serves the file with its stored type (a generic upload of a known media extension is served as that media, including files uploaded before this rule), inline, with `X-Content-Type-Options: nosniff`. If the stored bytes are missing it answers `410`.
 - The list returns the 200 most recent files you can read.
 
 ### Re-scope or delete
