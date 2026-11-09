@@ -4,7 +4,7 @@ What each release changed.
 
 ## 2026-11-10 — A pair link has a QR and a short code
 
-- `POST /access-keys/pair` also answers `code` (eight characters, like `K7QM-2XHD`), `code_url` and `code_command`. `GET /pair/{token}` accepts the code in any case, with or without its dash. Running either form spends both; minting again replaces both (#1068).
+- `POST /access-keys/pair` also answers `code` (ten characters, like `K7QM2-XHD9P`), `code_url` and `code_command`. `GET /pair/{token}` accepts the code in any case, with or without its dash. Running either form spends both; minting again replaces both (#1068).
 - The console's `/pair` page shows `code_url` as a QR. The new device scans it, or types the address, and `/p/<code>` shows the pair command to copy. The page needs no session, and opening it spends nothing.
 - The served auth skill (3.2.4), Devices and Enrolment, Dashboard and API Reference describe the code.
 

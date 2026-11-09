@@ -6,7 +6,7 @@ import { useParams } from 'next/navigation';
 // The address a pair link's QR (and its short code) opens on the new device.
 // Showing the command spends nothing; running it mints the access key, once.
 // The page needs no session: the device has none yet (#1068).
-const CODE = /^[A-Za-z0-9]{4}-?[A-Za-z0-9]{4}$/;
+const CODE = /^[A-Za-z0-9]{5}-?[A-Za-z0-9]{5}$/;
 
 export default function PairCodePage() {
   const { code } = useParams<{ code: string }>();

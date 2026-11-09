@@ -370,10 +370,11 @@ def generate_access_keypair(username: str, device_name: str) -> dict:
 
 
 # A pair code is the short, typeable form of a pair link: a device that cannot
-# scan a QR (a headset) opens /p/<code> by hand. No 0/O, 1/I/L or U; 30^8 is
-# about 2^39, against a link that lives an hour and spends on first use.
+# scan a QR (a headset) opens /p/<code> by hand. No 0/O, 1/I/L or U; 30^10 is
+# about 2^49, against a link that lives an hour and spends on first use, with
+# nothing rate-limiting guesses at GET /pair/{code}.
 PAIR_CODE_ALPHABET = "ABCDEFGHJKMNPQRSTVWXYZ23456789"
-PAIR_CODE_LENGTH = 8
+PAIR_CODE_LENGTH = 10
 
 
 def normalize_pair_code(code: str) -> str:

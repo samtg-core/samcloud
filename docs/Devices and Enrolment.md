@@ -147,7 +147,7 @@ Fetching the script does not spend the token. Activation does. The registry fill
 
 A route needs an access key. A new phone or laptop has no samcloud token, so it cannot call the setup script itself. A pair link solves that: mint it where you are signed in, and run its command on the device.
 
-**In the dashboard:** `/pair` (also reached from a device's **Pair / Access Key** button, or **Generate Access Key** after enrolling a route). Your username is filled in when you are logged in. Enter the device name and press **Make Pair Command**. The page shows a QR and a short address (`$PUBLIC_URL/p/K7QM-2XHD`). On the new device, scan the QR or type the address. That page shows the command; copy it and run it in a terminal there. The pair command itself is shown below the QR, for running directly. It works once, within an hour. **Or generate in browser instead** mints the key directly and shows the private key once, to download.
+**In the dashboard:** `/pair` (also reached from a device's **Pair / Access Key** button, or **Generate Access Key** after enrolling a route). Your username is filled in when you are logged in. Enter the device name and press **Make Pair Command**. The page shows a QR and a short address (`$PUBLIC_URL/p/K7QM2-XHD9P`). On the new device, scan the QR or type the address. That page shows the command; copy it and run it in a terminal there. The pair command itself is shown below the QR, for running directly. It works once, within an hour. **Or generate in browser instead** mints the key directly and shows the private key once, to download.
 
 ![The pair page](images/pair.png)
 
@@ -158,14 +158,14 @@ curl -s -X POST $PLANE/access-keys/pair -H @"$HOME/.samcloud/token.hdr" \
   -H "Content-Type: application/json" \
   -d '{"username": "you", "device_name": "laptop-1"}'
 # {"key_id": "you@laptop-1", "pair_url": "…", "pair_command": "curl -fsS $PUBLIC_URL/api/v1/pair/sc_pair_… | bash",
-#  "code": "K7QM-2XHD", "code_url": "$PUBLIC_URL/p/K7QM-2XHD", "code_command": "curl -fsS $PUBLIC_URL/api/v1/pair/K7QM-2XHD | bash", "expires_in": 3600}
+#  "code": "K7QM2-XHD9P", "code_url": "$PUBLIC_URL/p/K7QM2-XHD9P", "code_command": "curl -fsS $PUBLIC_URL/api/v1/pair/K7QM2-XHD9P | bash", "expires_in": 3600}
 ```
 
 - **The rule is the access-key rule:** your own username, or any username if you are the admin.
 - **A link works once, for an hour.** Minting again for the same user and device replaces it.
 - **Running it** mints a key for `username@device_name`, replacing any earlier key with that id, and serves the setup script that installs it.
 - **A used, expired or unknown link** answers 410 with a script that only prints why and exits 1.
-- **The short code is the same link.** `code` is eight characters with no 0/O, 1/I/L or U. `GET /pair/{code}` accepts it in any case, with or without the dash. Running either form spends both. `code_url` is a console page that needs no session and only shows the command, so opening it, or a link preview fetching it, spends nothing.
+- **The short code is the same link.** `code` is ten characters with no 0/O, 1/I/L or U. `GET /pair/{code}` accepts it in any case, with or without the dash. Running either form spends both. `code_url` is a console page that needs no session and only shows the command, so opening it, or a link preview fetching it, spends nothing.
 - **A pair token is not a bearer**, and neither is its code. No other route accepts them.
 
 ### Access keys for routes

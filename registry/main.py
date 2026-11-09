@@ -9744,7 +9744,7 @@ def create_access_key_pair_link(req: AccessKeyRequest, auth: AuthContext = Depen
 
     token, code = enrollment.generate_pair_token(req.username, req.device_name,
                                                  ttl_seconds=PAIR_TOKEN_TTL_SECONDS)
-    code = f"{code[:4]}-{code[4:]}"
+    code = f"{code[:5]}-{code[5:]}"
     public_url = os.environ.get("PUBLIC_URL", "http://localhost:7778")
     pair_url = f"{public_url}/api/v1/pair/{token}"
     return {

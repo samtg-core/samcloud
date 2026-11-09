@@ -7505,7 +7505,7 @@ class TestAccessKeyPairLink:
                         json={"username": "admin", "device_name": "headset"})
         link = r.json()
         code = link["code"]
-        assert len(code) == 9 and code[4] == "-"
+        assert len(code) == 11 and code[5] == "-"
         assert link["code_url"].endswith(f"/p/{code}")
         assert link["code_command"].endswith(f"/api/v1/pair/{code} | bash")
         app = _get_app()
@@ -7524,11 +7524,13 @@ class TestAccessKeyPairLink:
                            json={"username": "admin", "device_name": "phone"}).json()
         app = _get_app()
         with TestClient(app) as raw:
+            for bearer in (link["code"], link["code"].replace("-", ""),
+                           link["code"].replace("-", "").lower()):
+                assert raw.get("/api/v1/auth/verify", headers={
+                    "Authorization": f"Bearer {bearer}"}).status_code == 401
             assert raw.get(self._path(link["pair_url"])).status_code == 200
             assert raw.get(f"/api/v1/pair/{link['code']}").status_code == 410
-            assert raw.get("/api/v1/pair/ABCD-EFGH").status_code == 410
-            assert raw.get("/api/v1/auth/verify", headers={
-                "Authorization": f"Bearer {link['code']}"}).status_code == 401
+            assert raw.get("/api/v1/pair/ABCDE-FGHJK").status_code == 410
 
     def test_minting_again_replaces_the_short_code(self, client, tmp_db):
         body = {"username": "admin", "device_name": "again"}

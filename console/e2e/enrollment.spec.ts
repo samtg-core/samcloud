@@ -163,7 +163,7 @@ test.describe('Pair Page', () => {
     await login(page);
     await page.goto(`/pair?device=pw-qr-${Date.now()}`);
     await page.getByRole('button', { name: 'Make Pair Command' }).click();
-    const qr = page.getByRole('img', { name: /\/p\/[A-Z0-9]{4}-[A-Z0-9]{4}$/ });
+    const qr = page.getByRole('img', { name: /\/p\/[A-Z0-9]{5}-[A-Z0-9]{5}$/ });
     await expect(qr).toBeVisible({ timeout: 10000 });
     const address = await qr.getAttribute('aria-label');
 
@@ -171,7 +171,7 @@ test.describe('Pair Page', () => {
     const device = await (await browser.newContext()).newPage();
     await device.goto(address!);
     await expect(device.getByRole('heading', { name: 'Pair this device' })).toBeVisible();
-    await expect(device.getByText(/curl -fsS .*\/api\/v1\/pair\/[A-Z0-9]{4}-[A-Z0-9]{4} \| bash/)).toBeVisible();
+    await expect(device.getByText(/curl -fsS .*\/api\/v1\/pair\/[A-Z0-9]{5}-[A-Z0-9]{5} \| bash/)).toBeVisible();
   });
 
   test('shows error for non-existent user', async ({ page }) => {
