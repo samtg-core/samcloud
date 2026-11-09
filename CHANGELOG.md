@@ -2,6 +2,11 @@
 
 What each release changed.
 
+## 2026-11-09 — The gateway reads a newline after `--` as the delimiter
+
+- `ssh samcloud "<device> --\n<cmd>"` (a heredoc or a here-string) answered *Unknown target* because only a space counted around `--`. Any whitespace on both sides now does.
+- An unknown target's message carries the usage line, `<device> -- <command>`, and points at `devices`. SSH Gateway lists both.
+
 ## 2026-11-07 — The docs state the access rules as they are
 
 - The enrolment, device-manager, invite, route-activation and event-visibility rules read the same in the docs, the served skills (auth 3.2.3) and the `GET /api/v1/` index.

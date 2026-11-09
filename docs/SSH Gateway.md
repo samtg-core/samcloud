@@ -73,7 +73,7 @@ Each command works in the interactive menu and as `ssh samcloud "<command>"`:
 | command | what it does |
 |---|---|
 | `<device-id>` | Open an interactive shell on the device. |
-| `<device-id> -- <cmd>` | Run one command on the device. Its stdout is yours; its exit code is the gateway's. |
+| `<device-id> -- <cmd>` | Run one command on the device. Its stdout is yours; its exit code is the gateway's. The `--` needs whitespace on both sides, and a newline or tab counts, so a command piped in on stdin after `<device> --` works. |
 | `devices` / `ls` `[--json]` | List the targets you can reach. `--json` gives `[{"id", "method", "status", "detail"}]`. |
 | `status` `[--json]` | The plane's totals: devices, services, ports, open tickets. |
 | `shell` | Drop to a shell in the gateway's container (admin only). |
@@ -87,7 +87,7 @@ Each command works in the interactive menu and as `ssh samcloud "<command>"`:
 | `2` | usage error, such as `<device> --` with no command |
 | `125` | the target is misconfigured: no outbound method, no address, no tunnel port, no SSH user, or a method the gateway can't route |
 | `126` | access denied |
-| `127` | unknown target |
+| `127` | unknown target; the message carries the usage line and points at `devices` |
 | `255` | ssh failed to connect, or the target's host key was refused or could not be checked |
 
 These can collide with a remote command's own code, so tell them apart by the gateway's message on stderr. `shell` without admin exits 1 with "Permission denied: admin access required".
