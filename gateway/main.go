@@ -116,24 +116,36 @@ func main() {
 	interactive(username, device)
 }
 
+// splitDirective splits an optional remote command off the gateway directive.
+// The first standalone "--" (whitespace before it, whitespace or the end after
+// it) is the delimiter; everything after it is run verbatim on the target.
+// Form: "<target|subcmd> [flags] [-- <remote command...>]". A newline counts as
+// whitespace, so "x --\n<script>" carries the script rather than opening a shell.
+func splitDirective(cmd string) (directive, remote string, hadDelim bool) {
+	for i := 1; i+2 <= len(cmd); i++ {
+		if cmd[i] != '-' || cmd[i+1] != '-' || !isSpace(cmd[i-1]) {
+			continue
+		}
+		if i+2 == len(cmd) {
+			return strings.TrimSpace(cmd[:i]), "", true
+		}
+		if isSpace(cmd[i+2]) {
+			return strings.TrimSpace(cmd[:i]), strings.TrimSpace(cmd[i+3:]), true
+		}
+	}
+	return cmd, "", false
+}
+
+func isSpace(b byte) bool {
+	return b == ' ' || b == '\t' || b == '\n' || b == '\r'
+}
+
 // handleCommand dispatches one directive. interactiveMode is true when called
 // from the menu loop (failures print and return to the menu) and false for a
 // non-interactive SSH_ORIGINAL_COMMAND (failures exit the process non-zero, so
 // `ssh samcloud "x -- cmd" && next` is honest about routing failures).
 func handleCommand(username, device, cmd string, interactiveMode bool) {
-	// Split an optional remote command off the gateway directive. The first
-	// standalone " -- " is the delimiter; everything after it is run verbatim
-	// on the target. Form: "<target|subcmd> [flags] [-- <remote command...>]"
-	var remoteCmd string
-	hadDelim := false
-	if idx := strings.Index(cmd, " -- "); idx >= 0 {
-		remoteCmd = strings.TrimSpace(cmd[idx+4:])
-		cmd = strings.TrimSpace(cmd[:idx])
-		hadDelim = true
-	} else if strings.HasSuffix(cmd, " --") {
-		cmd = strings.TrimSpace(strings.TrimSuffix(cmd, " --"))
-		hadDelim = true
-	}
+	cmd, remoteCmd, hadDelim := splitDirective(cmd)
 
 	parts := strings.Fields(cmd)
 	if len(parts) == 0 {
@@ -290,7 +302,7 @@ func routeTo(username, device, target, remoteCmd string, interactiveMode bool) {
 	// Look up target device
 	dev := getDevice(target)
 	if dev == nil {
-		fmt.Fprintf(os.Stderr, "Unknown target: %s\n", target)
+		fmt.Fprintf(os.Stderr, "Unknown target: %s (usage: <device> -- <command>; 'devices' lists targets)\n", target)
 		fail(127)
 		return
 	}
