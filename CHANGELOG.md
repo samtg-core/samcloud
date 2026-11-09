@@ -2,6 +2,10 @@
 
 What each release changed.
 
+## 2026-11-09 — Outside pull requests are welcome
+
+- CONTRIBUTING.md, the README and docs/Contributing.md invite pull requests from outside contributors. Each is reviewed and merged by a person, never automatically; for anything larger than a small fix, an issue comes first.
+
 ## 2026-11-07 — The docs state the access rules as they are
 
 - The enrolment, device-manager, invite, route-activation and event-visibility rules read the same in the docs, the served skills (auth 3.2.3) and the `GET /api/v1/` index.
