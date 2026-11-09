@@ -1,4 +1,4 @@
-<!-- SKILL_VERSION: 3.18.3 -->
+<!-- SKILL_VERSION: 3.19.0 -->
 # tools — the API, the write tool, the helpers, the machines
 
 ## The API
@@ -234,6 +234,52 @@ GET    /gateway/host-key                 the gateway's own host keys, so a devic
 Clear the pin only when you know why the key changed — a device rebuilt or
 re-keyed on purpose. The next hop pins what it then presents. The first hop to a
 device with no pin records its key and needs nobody.
+
+## Bring a machine or an account onto the plane
+
+A *device* is one account on one machine that the gateway can log in as. Make the OS account first: one for each seat or service, separate from anyone's own login.
+
+```
+POST /enroll {"device_id": "studio-services", "access_target": "direct-ssh",
+              "target_ip": "192.168.1.50", "target_ssh_user": "studio-services",
+              "group_ids": ["work"]}
+```
+
+The answer carries `bootstrap_command`, `curl -s https://cloud.samtg.xyz/api/v1/bootstrap/<token> | bash`: one use, one hour. Run it once on the machine, signed in as `target_ssh_user`. It installs the gateway's key, pins the machine's host key, starts the tunnel for a `reverse-tunnel` device, writes the device token to `~/.config/samcloud/device_token`, and activates the device. A Windows machine takes `…/bootstrap/<token>/ps1`.
+
+`access_target` is how the gateway reaches the account: `direct-ssh` to `target_ip` on the LAN, or `reverse-tunnel`, where the machine dials out and the answer names its `tunnel_port`. Enrolling takes the editor role: the device joins the `group_ids` you name, each one a group you edit, or else every group you edit. The admin can enroll into any group.
+
+```
+ssh samcloud "studio-services -- id"         the gateway reaches it, as target_ssh_user
+GET  /devices/studio-services/guide          its route, services, and how to grant access
+POST /enroll/studio-services/retoken         a fresh bootstrap token: a retry, or a re-key after a rebuild
+GET  /enroll/pending                         enrolled, never activated (admin)
+```
+
+`device:<id>` lets a seat manage the device, and it is also that seat's way in through the gateway, as `target_ssh_user`. Give it only to a seat that should have that shell.
+
+## Publish a service
+
+```
+POST /services {"name": "asset-registry", "device_id": "studio-services", "port": 8790,
+                "description": "what it does", "subdomain": "assets", "health_endpoint": "/health"}
+```
+
+On a device you manage, this serves `https://<subdomain>.samtg.xyz`: the route, the TLS certificate, the DNS record, and a forward port when the device has a tunnel. The id is `<device_id>/<name>`; send no `id`.
+
+The answer carries:
+
+- `external_url`, and `route`: forward, caddy, dns and a reachability check, each with its own `success`.
+- `service_token`, the service's own token, shown once. Keep it in a 0600 file; the service reports health and reads its guide with it.
+- `guide_url`, which is `GET /services/{id}/guide`: the service's operations page.
+
+On a `reverse-tunnel` device the service listens on `127.0.0.1` and the tunnel reaches it there. On a `direct-ssh` device the plane calls `target_ip:port`, so it listens on the LAN address. Before you share the URL, call it from outside with no token: every route that needs sign-in answers `401`.
+
+```
+POST   /services/{id}/health      with the service token: marks it online
+PATCH  /services/{id}             port, description, health_endpoint, version, capabilities
+DELETE /services/{id}             the service, its route, its DNS record and its token
+```
 
 ## Threads
 

@@ -2,6 +2,15 @@
 
 What each release changed.
 
+## 2026-11-09 — The skill covers enrolment, services and identities; the API index lists every route
+
+- **No skill page named how a machine or an account joins the plane, how a service is published, or how an identity is added** (ticket #1048). Bringing Obelisk on, four seats improvised a device-scope grant, a hand-made `POST /devices` and a gateway key pasted in through sudo, and the grant would have given a shell on Sam's login. Of 186 routes, 98 were named in a skill page and 121 in `GET /api/v1/`; 48 were in neither, `/enroll` and `/bootstrap/{token}` among them.
+- **`tools.md` 3.19.0:** *Bring a machine or an account onto the plane* (`POST /enroll`, the bootstrap command run as the target account, the gateway check, retoken, pending, and what `device:<id>` grants; enrolling takes the editor role) and *Publish a service* (`POST /services`, what the answer carries, where the service listens for each kind of device, the check before sharing the URL, health, update, delete).
+- **`auth.md` 3.3.0:** *Add an identity* (invite, activate, the briefing, who may invite with what, an identity with no scopes, ending a token). Its invite example names the group in `scopes`, as `group_roles` requires.
+- **`SKILL.md` 3.13.0:** the table routes "bring a machine or an account onto the plane, publish a service" to `tools.md`, and "add an identity" to `auth.md`.
+- **`GET /api/v1/` lists every route a seat calls:** enrolment and bootstrap, device helpers, gateway admin, ports, files, skills, `helpers/{name}`, audit, views, group member and device edits, `regenerate-token`, doc watchers, `POST /services/register` and `POST /probe`. `POST /services` describes its answer, including the `service_token`. `users` had the key `briefing` twice, so `GET /users/brief/{token}` was never listed; it is `invite_briefing` now.
+- **`sandbox/docs_coverage.py` fails on a route that is neither in `GET /api/v1/` nor in `INTERNAL_ROUTES`** (the rail's claims, presence, beacon and `notifications/seen`, each with its reason), and on an internal entry that names no served route.
+
 ## 2026-11-07 — The docs state the access rules as they are
 
 - The enrolment, device-manager, invite, route-activation and event-visibility rules read the same in the docs, the served skills (auth 3.2.3) and the `GET /api/v1/` index.
