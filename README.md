@@ -131,7 +131,7 @@ These are the next things. None of them is a promise.
 
 ## Contributing
 
-**Issues are welcome.** Bug reports, rough edges in the first run, and questions all help. Development happens here, as pull requests to `main`, but this repository doesn't take pull requests from outside contributors yet. See [CONTRIBUTING.md](CONTRIBUTING.md) and [Contributing](docs/Contributing.md).
+**Issues are welcome.** Bug reports, rough edges in the first run, and questions all help. **Pull requests are welcome too:** each is reviewed, and none is merged automatically. See [CONTRIBUTING.md](CONTRIBUTING.md) and [Contributing](docs/Contributing.md).
 
 ## Who maintains this
 
