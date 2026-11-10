@@ -5,7 +5,7 @@ How samcloud's code changes. Development happens in the public repository, [gith
 ## Issues and pull requests
 
 - **Issues are welcome:** bugs, rough edges in the first run, unclear docs, questions. Say what you ran, what you expected and what happened. Paste the output, with tokens removed.
-- **Pull requests from outside contributors aren't accepted yet.** A fix you describe in an issue is the most direct way to get something changed, and it is credited in the release that carries it.
+- **Pull requests are welcome,** from a fork. The maintainer reviews each one, and a human co-admin merges it; nothing is merged automatically, and a review can ask for changes or decline. For anything larger than a small fix, open an issue first so the approach can be agreed before you build it. A pull request carries what any change carries ([below](#what-a-change-carries)).
 - **Security problems** go through [SECURITY.md](../SECURITY.md), not issues.
 
 ## Running it from a checkout
