@@ -9338,8 +9338,8 @@ def api_index():
             "access_keys": {
                 "create": {"method": "POST", "path": "/api/v1/access-keys", "description": "Generate SSH keypair for gateway access. Returns private key ONCE."},
                 "setup_script": {"method": "POST", "path": "/api/v1/access-keys/setup-script", "description": "Generate key + bash install script"},
-                "pair": {"method": "POST", "path": "/api/v1/access-keys/pair", "description": "Single-use pair link (1 h) for a device with no samcloud token: run its pair_command on that device"},
-                "pair_redeem": {"method": "GET", "path": "/api/v1/pair/{token}", "auth": "none", "description": "Spend a pair link: mints the key and serves its setup script"},
+                "pair": {"method": "POST", "path": "/api/v1/access-keys/pair", "description": "Single-use pair link (1 h) for a device with no samcloud token: run its pair_command on that device, or open its code_url there (the console /pair page shows it as a QR) and run the command it shows"},
+                "pair_redeem": {"method": "GET", "path": "/api/v1/pair/{token}", "auth": "none", "description": "Spend a pair link (its sc_pair_ token or short code): mints the key and serves its setup script"},
                 "list": {"method": "GET", "path": "/api/v1/access-keys"},
                 "revoke": {"method": "DELETE", "path": "/api/v1/access-keys/{key_id}"},
             },
@@ -9734,17 +9734,26 @@ def create_access_key_pair_link(req: AccessKeyRequest, auth: AuthContext = Depen
     `pair_command` on the new device spends the link and installs a fresh
     access key for `username@device_name`. Valid for an hour; minting again
     for the same user and device replaces the previous link.
+
+    `code` is the link's short form and `code_url` the console page that shows
+    its command to copy: the console's /pair page draws `code_url` as a QR, and
+    a device that cannot scan opens it by hand. Opening the page spends nothing;
+    running the command does, and spends the long link with it.
     """
     _authorize_access_key_mint(req, auth)
 
-    token = enrollment.generate_pair_token(req.username, req.device_name,
-                                           ttl_seconds=PAIR_TOKEN_TTL_SECONDS)
+    token, code = enrollment.generate_pair_token(req.username, req.device_name,
+                                                 ttl_seconds=PAIR_TOKEN_TTL_SECONDS)
+    code = f"{code[:5]}-{code[5:]}"
     public_url = os.environ.get("PUBLIC_URL", "http://localhost:7778")
     pair_url = f"{public_url}/api/v1/pair/{token}"
     return {
         "key_id": f"{req.username}@{req.device_name}",
         "pair_url": pair_url,
         "pair_command": f"curl -fsS {pair_url} | bash",
+        "code": code,
+        "code_url": f"{public_url}/p/{code}",
+        "code_command": f"curl -fsS {public_url}/api/v1/pair/{code} | bash",
         "expires_in": PAIR_TOKEN_TTL_SECONDS,
     }
 
@@ -9753,7 +9762,8 @@ def create_access_key_pair_link(req: AccessKeyRequest, auth: AuthContext = Depen
 def redeem_access_key_pair_link(token: str):
     """Spend a pair link: mint the access key it names and serve its setup script.
 
-    No bearer: the single-use token is the credential. A used, expired or
+    `token` is the long sc_pair_ token or its short code (any case, dashes
+    optional). No bearer: the single-use token is the credential. A used, expired or
     unknown link answers 410 with a script that only prints why, so
     `curl ... | bash` never runs an error body.
     """

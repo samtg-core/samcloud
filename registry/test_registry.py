@@ -7499,6 +7499,48 @@ class TestAccessKeyPairLink:
             assert raw.get("/api/v1/auth/verify",
                            headers={"Authorization": f"Bearer {token}"}).status_code == 401
 
+    def test_the_short_code_installs_a_key_once_and_spends_the_link(self, client, tmp_db):
+        """The console draws code_url as a QR, and a headset types it (#1068)."""
+        r = client.post("/api/v1/access-keys/pair",
+                        json={"username": "admin", "device_name": "headset"})
+        link = r.json()
+        code = link["code"]
+        assert len(code) == 11 and code[5] == "-"
+        assert link["code_url"].endswith(f"/p/{code}")
+        assert link["code_command"].endswith(f"/api/v1/pair/{code} | bash")
+        app = _get_app()
+        with TestClient(app) as raw:
+            typed = code.replace("-", "").lower()
+            first = raw.get(f"/api/v1/pair/{typed}")
+            assert first.status_code == 200, first.text
+            assert "BEGIN OPENSSH PRIVATE KEY" in first.text
+            assert raw.get(f"/api/v1/pair/{code}").status_code == 410
+            assert raw.get(self._path(link["pair_url"])).status_code == 410
+        keys = client.get("/api/v1/access-keys").json()
+        assert [k["key_id"] for k in keys] == ["admin@headset"]
+
+    def test_the_long_link_spends_the_short_code(self, client, tmp_db):
+        link = client.post("/api/v1/access-keys/pair",
+                           json={"username": "admin", "device_name": "phone"}).json()
+        app = _get_app()
+        with TestClient(app) as raw:
+            for bearer in (link["code"], link["code"].replace("-", ""),
+                           link["code"].replace("-", "").lower()):
+                assert raw.get("/api/v1/auth/verify", headers={
+                    "Authorization": f"Bearer {bearer}"}).status_code == 401
+            assert raw.get(self._path(link["pair_url"])).status_code == 200
+            assert raw.get(f"/api/v1/pair/{link['code']}").status_code == 410
+            assert raw.get("/api/v1/pair/ABCDE-FGHJK").status_code == 410
+
+    def test_minting_again_replaces_the_short_code(self, client, tmp_db):
+        body = {"username": "admin", "device_name": "again"}
+        old = client.post("/api/v1/access-keys/pair", json=body).json()
+        new = client.post("/api/v1/access-keys/pair", json=body).json()
+        app = _get_app()
+        with TestClient(app) as raw:
+            assert raw.get(f"/api/v1/pair/{old['code']}").status_code == 410
+            assert raw.get(f"/api/v1/pair/{new['code']}").status_code == 200
+
     def test_a_route_enrollment_points_at_the_pair_link(self, client, tmp_db):
         r = client.post("/api/v1/enroll", json={"device_id": "alices-phone",
                                                 "access_route": "ssh-tunnel"})

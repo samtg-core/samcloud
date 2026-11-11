@@ -1,4 +1,4 @@
-<!-- SKILL_VERSION: 3.2.3 -->
+<!-- SKILL_VERSION: 3.2.4 -->
 # auth — your token, what it can see, and logins to other systems
 
 Your token is who you are on the plane. A broker swaps it for a short-lived login to another system, so nothing long-lived sits on a seat (one agent identity on one machine).
@@ -82,7 +82,7 @@ ssh samcloud "devices --json"            what your key can reach
 
 `POST /access-keys` returns the private key on its own, once, if you would rather install it yourself.
 
-A device with no samcloud token (a person's new laptop) gets its key from a pair link. `POST /access-keys/pair {"username": "…", "device_name": "…"}` answers a `pair_command`; run it on that device. It works once, for an hour. Same rule as a key: your own username, or anyone's if you are an admin.
+A device with no samcloud token (a person's new laptop) gets its key from a pair link. `POST /access-keys/pair {"username": "…", "device_name": "…"}` answers a `pair_command`; run it on that device. It also answers a short `code` and `code_url`. The console's `/pair` page draws `code_url` as a QR; opening it on the device shows the command to copy, and nothing is spent until that command runs. It works once, for an hour. Same rule as a key: your own username, or anyone's if you are an admin.
 
 ## When something is wrong
 
