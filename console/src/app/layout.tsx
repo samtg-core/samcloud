@@ -6,6 +6,7 @@ import { ThumbNav } from "@/components/ThumbNav";
 import { ScopePill } from "@/components/ScopePill";
 import { ThreadPill } from "@/components/ThreadPill";
 import { InboxQueuePill } from "@/components/InboxQueuePill";
+import { SearchHotkey } from "@/components/SearchHotkey";
 import "./globals.css";
 
 const geistSans = Geist({
@@ -40,6 +41,7 @@ export default function RootLayout({
                 <span className="text-zinc-400">sam</span>cloud
               </h1>
               <nav className="flex items-center gap-3 sm:gap-6 text-sm overflow-x-auto ml-auto scrollbar-none">
+                <SearchHotkey />
                 <ScopePill />
                 <ThreadPill />
                 <a href="/" className="text-zinc-100 hover:text-white whitespace-nowrap">Dashboard</a>

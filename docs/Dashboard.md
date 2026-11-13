@@ -30,11 +30,12 @@ Four pages work before you sign in. Every other page sends you to `/login` first
 The header stays at the top of the screen as you scroll. It carries:
 - **The scope switch** (`all scopes`, or one of your groups). Picking a group narrows the Tickets, Docs and Projects lists to it, and turns amber so a narrowed view is never mistaken for the whole.
 - **The thread switch.** Everything you create in the dashboard joins one thread, the way a session does. It shows the current thread as `#id title`, or *new thread* when the next thing you create will start one. Pick *New thread* for a fresh conversation, or resume one of the open threads listed. [Agent Rail](Agent%20Rail.md) explains threads and conversations.
+- **Search** (the magnifier, first in the bar). ⌘K or Ctrl-K, or `/` when you are not typing, opens it from any page.
 - **Dashboard, Inbox, Admin, Tickets, Docs, Projects**, your username and **Logout**. Inbox carries your unread count.
 
 Wherever markdown is shown (ticket, doc and task bodies and comments), a plane reference is a link: `ticket 1082`, `#1082`, `doc 470` and `task 869` open that page, and hovering one shows its title. A bare `#N` needs two or more digits and is never read after *PR*. A wide table scrolls inside its own box, and a long word or URL wraps, so nothing pushes the page sideways on a phone.
 
-In the bottom-right corner, **≡** opens quick actions: *New ticket*, *New doc*, *New task*, *Upload file* and *Jump to inbox*, with the unread count. On pages with comments or sections, the arrows beside it step to the next or previous one; a double-click jumps to the bottom or top.
+In the bottom-right corner, **≡** opens quick actions: *Search*, *New ticket*, *New doc*, *New task*, *Upload file* and *Jump to inbox*, with the unread count. On pages with comments or sections, the arrows beside it step to the next or previous one; a double-click jumps to the bottom or top.
 
 When you open a notification from the inbox, the rest of the list becomes a queue: a pill at the bottom of the page offers *next* and *back* until you dismiss it.
 
@@ -111,6 +112,12 @@ curl -s -X DELETE $PLANE/views/7 -H @"$HOME/.samcloud/token.hdr"
 ```
 
 `$PLANE` and `H` are set as in [Getting Started](Getting%20Started.md). A view's entity is fixed once it's made. Only its owner, or an admin, can change it. `results` takes `limit` up to 500 (default 100). [Notifications and Subscriptions](Notifications%20and%20Subscriptions.md) covers what lands in the inbox and why.
+
+## Search: `/search`
+
+One box over tickets, tasks and docs: their titles, bodies and comments. Every word you type must appear somewhere in the record; `#1082` or `1082` also finds that record by id. Title matches come first, then bodies, then comments, newest first within each; a comment match shows who wrote it and the words around the match, highlighted.
+
+The filters mean the same on all three: **tickets · tasks · docs** (each with its count), **assigned to me** (a doc's owner), a status (*Active* is work still moving: open, triaged or in-progress tickets, to-do, in-progress or blocked tasks, draft or active docs; also *Blocked tasks*, *In progress*, *Finished* and others), and a time window. With no words, the filters alone list everything that matches them, such as every blocked task. The scope switch narrows it to a group. The search lives in the address, so a link to it shows the same results.
 
 ## Tickets: `/tickets` and `/tickets/<id>`
 

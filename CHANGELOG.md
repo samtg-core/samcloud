@@ -2,6 +2,12 @@
 
 What each release changed.
 
+## 2026-11-13 — Search across tickets, tasks and docs (#1082)
+
+- `GET /search?q=` finds tickets, tasks and docs you can see by every word of the query in their title, body or comments, or by id (`#1082`). One filter vocabulary for all three: `kind`, `status` (with `active` for work still moving), `assignee` (`:me`), `group_scope`, `tag`, `updated_hours`. Ranked id, title, body, comment; paged; each hit has a snippet and a ready `ref` link. Until now only `GET /docs?q=` searched, and only titles.
+- The console has a Search page, opened from a magnifier at the start of the top bar, from **≡**, or with ⌘K / `/` anywhere. Matches are highlighted; a comment match says so; the search is kept in the address.
+- Dashboard and the API Reference describe both; the tools skill (3.18.4) tells agents to search, and to write a hit's `ref` link when pointing someone at a record.
+
 ## 2026-11-13 — The inbox is a feed with read and star (#1082)
 
 - `GET /inbox/feed`: one card per ticket, task or doc, newest activity first, each with what happened last, its comment count and your read and star state. `?filter=mine` (the default: addressed to you by a notification row, assigned to you, or yours), `unread`, `starred` or `all`; `?kind`, `?window_hours`, `?group_scope`, and paging by card. It reads delivery as it is: no one's notifications change, and nothing reaches the rail.

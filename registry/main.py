@@ -9299,6 +9299,7 @@ def api_index():
                 "activate": {"method": "POST", "path": "/api/v1/users/activate", "description": "Consume invite, get permanent token"},
                 "guide": {"method": "GET", "path": "/api/v1/users/me/guide", "auth": "self", "description": "Persistent operations guide"},
                 "briefing": {"method": "GET", "path": "/api/v1/users/me/briefing", "auth": "self", "description": "Personal briefing: unread inbox, blocked-on-you, decision-tagged tasks, pick-me menu, windowed movement"},
+                "search": {"method": "GET", "path": "/api/v1/search", "auth": "any", "description": "Search across planes (#1082): tickets, tasks and docs you can see whose title, body or comments hold every word of ?q (#N matches an id). One filter vocabulary for all: ?kind=ticket,task,doc ?status (comma list; active = open/triaged/in-progress tickets, todo/in-progress/blocked tasks, draft/active docs) ?assignee (:me; a doc's owner) ?group_scope ?tag ?updated_hours ?limit (30, max 100) ?offset. Ranked id > title > body > comment, newest first"},
                 "inbox_feed": {"method": "GET", "path": "/api/v1/inbox/feed", "auth": "self", "description": "The inbox as a feed (#1082): one card per ticket, task or doc, newest activity first, with your read/star state. ?filter=mine (default: addressed to you, assigned or yours) | unread | starred | all; ?kind=ticket,task,doc; ?window_hours (default 168); ?group_scope; ?limit/?offset by card. Reads delivery as it is; changes no one's notifications"},
                 "inbox_marks": {"method": "POST", "path": "/api/v1/inbox/marks", "auth": "self", "description": "{items:[{kind,id}], read?, starred?}: mark feed cards read/unread and starred/unstarred. Reading a card also marks your notification rows for it read"},
                 "inbox_read_all": {"method": "POST", "path": "/api/v1/inbox/read-all", "auth": "self", "description": "Mark the whole feed read: the epoch moves to now, stars stay, your unread notification rows are marked read"},
@@ -11240,6 +11241,189 @@ def inbox_read_all(auth: AuthContext = Depends(get_auth)):
     db.execute("UPDATE inbox_marks SET read_at = NULL WHERE identity = ?", (me,))
     n = db.execute_count("UPDATE notifications SET read = 1 WHERE recipient = ? AND read = 0", (me,))
     return {"epoch": _feed_epoch(me), "notifications_read": n}
+
+
+# ===== Search across planes (#1082) =====
+# One query over tickets, tasks and docs: titles, bodies and comments, with
+# one filter vocabulary for all three. Scope applies to every row, as on the
+# lists. Plain LIKE over the tables: at today's size (~1.1k tickets, ~1.2k
+# tasks, ~0.5k docs and their comments) a scan is milliseconds; FTS waits
+# until it is measured to be needed.
+
+_SEARCH_KINDS = ("ticket", "task", "doc")
+# "active" is the one cross-plane status: work that is still moving.
+_SEARCH_ACTIVE = {"ticket": ("open", "triaged", "in_progress"),
+                  "task": ("todo", "in_progress", "blocked"),
+                  "doc": ("draft", "active")}
+_SEARCH_ID_RE = _re.compile(r"^#?(\d+)$")
+
+
+def _search_terms(q: str) -> list[str]:
+    return [t for t in (q or "").lower().split() if t][:8]
+
+
+def _like(term: str) -> str:
+    return "%" + term.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_") + "%"
+
+
+def _search_snippet(text: str, terms: list[str], width: int = 180) -> str:
+    """The text around the first term found, on one line."""
+    flat = " ".join((text or "").split())
+    low = flat.lower()
+    at = min((low.find(t) for t in terms if low.find(t) >= 0), default=-1)
+    if at < 0:
+        return flat[:width]
+    start = max(0, at - width // 3)
+    return ("…" if start else "") + flat[start:start + width] + ("…" if start + width < len(flat) else "")
+
+
+def _search_kind(kind: str, terms: list[str], statuses, assignee, group_scope, tag, since):
+    """Rows of one kind matching every term (each term in the title, the body
+    or any comment) and the filters, before scope."""
+    if kind == "ticket":
+        base = ("SELECT t.*, t.summary AS title, t.body AS text FROM tickets t", "t", "ticket_comments", "ticket_id")
+    elif kind == "task":
+        base = ("SELECT t.*, t.detail AS text, p.slug AS project, p.group_scope AS project_scope "
+                "FROM tasks t JOIN projects p ON p.id = t.project_id", "t", "task_comments", "task_id")
+    else:
+        base = ("SELECT t.*, r.body AS text FROM docs t "
+                "LEFT JOIN doc_revisions r ON r.doc_id = t.id AND r.rev = t.current_rev",
+                "t", "doc_comments", "doc_id")
+    sql, a, ctable, ccol = base
+    title_col = "t.summary" if kind == "ticket" else "t.title"
+    body_col = {"ticket": "t.body", "task": "t.detail", "doc": "r.body"}[kind]
+    clauses, params = [], []
+    for term in terms:
+        like = _like(term)
+        m = _SEARCH_ID_RE.match(term)
+        one = (f"({title_col} LIKE ? ESCAPE '\\' OR COALESCE({body_col}, '') LIKE ? ESCAPE '\\' "
+               f"OR t.id IN (SELECT {ccol} FROM {ctable} WHERE body LIKE ? ESCAPE '\\')")
+        params += [like, like, like]
+        if kind == "doc":
+            one += " OR t.slug LIKE ? ESCAPE '\\'"
+            params.append(like)
+        if m:
+            one += " OR t.id = ?"
+            params.append(int(m.group(1)))
+        clauses.append(one + ")")
+    if statuses:
+        clauses.append(f"t.status IN ({','.join('?' * len(statuses))})")
+        params += list(statuses)
+    if assignee:
+        clauses.append("COALESCE(t.owner, t.source) = ?" if kind == "doc" else "t.assignee = ?")
+        params.append(assignee)
+    if group_scope:
+        if kind == "ticket":  # the same union as list_tickets (H2, #380)
+            clauses.append("(t.group_scope = ? "
+                           "OR t.device_id IN (SELECT device_id FROM group_devices WHERE group_id = ?) "
+                           "OR t.service_id IN (SELECT service_id FROM group_services WHERE group_id = ?))")
+            params += [group_scope] * 3
+        else:
+            clauses.append("p.group_scope = ?" if kind == "task" else "t.group_scope = ?")
+            params.append(group_scope)
+    if tag:
+        if kind == "doc":
+            return []                               # docs carry no tags
+        c, p = _tag_clause(tag)
+        clauses.append("t." + c)
+        params.append(p)
+    if since:
+        clauses.append("datetime(t.updated_at) >= datetime('now', ?)")
+        params.append(since)
+    where = " WHERE " + " AND ".join(clauses) if clauses else ""
+    return db.query(f"{sql}{where} ORDER BY t.updated_at DESC LIMIT 2000", tuple(params))
+
+
+@app.get("/api/v1/search")
+def search(q: str = "", kind: Optional[str] = None, status: Optional[str] = None,
+           assignee: Optional[str] = None, group_scope: Optional[str] = None,
+           tag: Optional[str] = None, updated_hours: Optional[int] = None,
+           limit: int = 30, offset: int = 0, auth: AuthContext = Depends(get_auth)):
+    """Search across planes (#1082): tickets, tasks and docs you can see whose
+    title, body or comments hold every word of `q` (case-insensitive; `#1082`
+    or `1082` also matches that id). The filters mean the same on every kind:
+    `kind` (comma list of ticket, task, doc), `status` (comma list; `active`
+    is open/triaged/in-progress tickets, todo/in-progress/blocked tasks and
+    draft/active docs), `assignee` (a doc's owner; `:me` is you),
+    `group_scope`, `tag` (tickets and tasks), `updated_hours`. With no `q`
+    it is the same filters over everything, newest first. Ranked: an exact
+    id, then title matches, then body, then comments; newest first within."""
+    me = auth.identity()
+    terms = _search_terms(q)
+    kinds = [k.strip() for k in (kind or ",".join(_SEARCH_KINDS)).split(",") if k.strip()]
+    if not kinds or set(kinds) - set(_SEARCH_KINDS):
+        raise HTTPException(400, f"kind must be a comma list of {', '.join(_SEARCH_KINDS)}")
+    wanted = [s.strip() for s in (status or "").split(",") if s.strip()]
+    if assignee == ":me":
+        assignee = me
+    if updated_hours is not None and not 1 <= int(updated_hours) <= 87600:
+        raise HTTPException(400, "updated_hours must be 1-87600")
+    since = f"-{int(updated_hours)} hours" if updated_hours else None
+    limit = max(1, min(int(limit), 100))
+    offset = max(0, int(offset))
+
+    seen_proj: dict = {}
+
+    def _see_task(r):
+        pid = r["project_id"]
+        if pid not in seen_proj:
+            proj = db.query_one("SELECT * FROM projects WHERE id = ?", (pid,))
+            seen_proj[pid] = bool(proj) and _can_see_project(auth, proj)
+        return seen_proj[pid]
+
+    visible = {"ticket": lambda r: _can_see_ticket(auth, r), "task": _see_task,
+               "doc": lambda r: _can_see_doc(auth, r)}
+    path = {"ticket": "tickets", "task": "tasks", "doc": "docs"}
+    results = []
+    for k in kinds:
+        statuses = []
+        for s in wanted:
+            statuses += list(_SEARCH_ACTIVE[k]) if s == "active" else [s]
+        rows = [r for r in _search_kind(k, terms, statuses, assignee, group_scope, tag, since)
+                if visible[k](r)]
+        if not rows:
+            continue
+        # which matched where, for the rank and the snippet
+        hits_by_id: dict = {}
+        if terms:
+            q_ids = ",".join("?" * len(rows))
+            ctable, ccol = {"ticket": ("ticket_comments", "ticket_id"), "task": ("task_comments", "task_id"),
+                            "doc": ("doc_comments", "doc_id")}[k]
+            for c in db.query(
+                    f"SELECT {ccol} AS oid, id, author, body, created_at FROM {ctable} "
+                    f"WHERE {ccol} IN ({q_ids}) AND body LIKE ? ESCAPE '\\' ORDER BY id DESC",
+                    tuple(r["id"] for r in rows) + (_like(terms[0]),)):
+                hits_by_id.setdefault(c["oid"], c)
+        for r in rows:
+            title, text = r.get("title") or "", r.get("text") or ""
+            low_t, low_b = title.lower(), text.lower()
+            exact = any((m := _SEARCH_ID_RE.match(t)) and int(m.group(1)) == r["id"] for t in terms)
+            in_title = bool(terms) and all(t in low_t for t in terms)
+            in_body = bool(terms) and any(t in low_b for t in terms)
+            comment = hits_by_id.get(r["id"])
+            if exact:
+                rank, where, snippet = 4, "id", _search_snippet(text, terms)
+            elif in_title:
+                rank, where, snippet = 3, "title", _search_snippet(text, terms)
+            elif in_body or not comment:
+                rank, where, snippet = (2 if in_body else 1), "body", _search_snippet(text, terms)
+            else:
+                rank, where = 1, "comment"
+                snippet = f"{comment['author']}: " + _search_snippet(comment["body"], terms)
+            results.append({
+                "kind": k, "id": r["id"], "title": title, "status": r.get("status"),
+                "href": f"/{path[k]}/{r['id']}", "ref": f"[{title}](/{path[k]}/{r['id']})",
+                "assignee": r.get("assignee") if k != "doc" else (r.get("owner") or r.get("source")),
+                "project": r.get("project"), "group_scope": r.get("project_scope") if k == "task" else r.get("group_scope"),
+                "updated_at": r.get("updated_at"), "match": where if terms else None,
+                "snippet": snippet, "_rank": rank if terms else 0,
+            })
+    results.sort(key=lambda x: (x["_rank"], _feed_ts(x["updated_at"])), reverse=True)
+    counts = {k: sum(1 for x in results if x["kind"] == k) for k in kinds}
+    page = results[offset:offset + limit]
+    for x in page:
+        x.pop("_rank", None)
+    return {"q": q, "terms": terms, "items": page, "total": len(results), "counts": counts}
 
 
 @app.get("/api/v1/users/me/briefing")

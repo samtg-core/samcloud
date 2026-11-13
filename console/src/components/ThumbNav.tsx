@@ -103,6 +103,7 @@ export function ThumbNav() {
       <div className="fixed bottom-3 right-3 z-50 flex flex-col items-end gap-2">
         {menu && (
           <div className="flex flex-col gap-1 rounded-lg border border-zinc-700 bg-zinc-900/95 backdrop-blur p-2 text-sm shadow-xl">
+            <a href="/search" className="px-3 py-1.5 rounded text-zinc-300 hover:bg-zinc-800 hover:text-white whitespace-nowrap">Search</a>
             <button
               onClick={() => { setMenu(false); setNewTicket(true); }}
               className="px-3 py-1.5 rounded text-zinc-300 hover:bg-zinc-800 hover:text-white whitespace-nowrap text-left"

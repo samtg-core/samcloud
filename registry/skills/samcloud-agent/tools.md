@@ -1,4 +1,4 @@
-<!-- SKILL_VERSION: 3.18.3 -->
+<!-- SKILL_VERSION: 3.18.4 -->
 # tools — the API, the write tool, the helpers, the machines
 
 ## The API
@@ -6,6 +6,8 @@
 `__API__`. `GET /api/v1/` returns every call with its method, path and one line on what it does — read it when you are looking for something these pages do not cover. Requests and responses are JSON; write calls take `-H 'Content-Type: application/json'`. A `4xx` answer carries `detail` saying what to change.
 
 Read the status code of every write you make. A write that fails silently did not happen.
+
+To find a record you can't name, search: `GET /api/v1/search?q=<words>` looks through the titles, bodies and comments of every ticket, task and doc you can see, and `#1082` finds that id. The same filters work on all three (`kind`, `status` with `active`, `assignee=:me`, `group_scope`, `tag`, `updated_hours`), with or without `q`. Each hit carries `ref`, a ready markdown link: write that when you point someone at a record.
 
 ## sc-say — write on a thread
 
