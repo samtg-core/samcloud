@@ -1,15 +1,17 @@
 'use client';
 
-// The inbox (#203 v2, doc #34): a stack of SAVED VIEWS — every section is a
-// named filter over live data (owned rows, editable/deletable/reorderable),
-// never a hardcoded block. Seeds arrive as data on first visit; "Blocked on
-// you" et al are just views you can change. Notifications views keep the
-// ack-as-handled machinery. Think Asana saved filters, plane-native.
+// The inbox: the feed on top (#1082 — one card per ticket, task or doc, read
+// and star per card; ./Feed.tsx), then a stack of SAVED VIEWS (#203 v2, doc
+// #34) — every section a named filter over live data (owned rows,
+// editable/deletable/reorderable), never a hardcoded block. Seeds arrive as
+// data on first visit; "Blocked on you" et al are just views you can change.
+// A notifications view's button marks rows read; they stay in the feed.
 
 import { timeAgo } from '@/lib/time';
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { useScopeGroups } from '@/lib/useScopeGroups';
-import { Markdown } from '@/components/Markdown';
+import { MdSnippet } from '@/components/MdSnippet';
+import { Feed } from './Feed';
 import { stashInboxQueue } from '@/components/InboxQueuePill';
 
 type Entity = 'tickets' | 'tasks' | 'notifications' | 'docs';
@@ -131,17 +133,6 @@ function eventLabel(n: Record<string, unknown>): string {
 function parentTitle(n: Record<string, unknown>): string {
   const p = (n.payload || {}) as { summary?: string; title?: string };
   return p.summary || p.title || '';
-}
-
-// Card previews render markdown, soft-clamped
-// by height since -webkit-line-clamp can't survive nested block tags.
-function MdSnippet({ text, strong = false }: { text: string; strong?: boolean }) {
-  if (!text) return null;
-  return (
-    <div className={`mt-1 max-h-11 overflow-hidden ${strong ? '' : 'opacity-80'} [&_*]:!text-xs [&_*]:!leading-snug [&_p]:!my-0.5 [&_pre]:!my-0.5 [&_ul]:!my-0.5 [&_ol]:!my-0.5 [&_img]:!max-h-8 [&_img]:!my-0`}>
-      <Markdown muted={!strong} flatLinks>{text}</Markdown>
-    </div>
-  );
 }
 
 // A card's preview line: whatever last touched it (the latest comment), so a
@@ -275,9 +266,9 @@ function NotifMentionRow({ n, onAck, onOpen }: { n: Record<string, unknown>; onA
           onClick={async () => { setBusy(true); await onAck([Number(n.id)]); setBusy(false); }}
           disabled={busy}
           className="text-xs text-zinc-500 hover:text-emerald-400 border border-zinc-700 rounded px-2 py-1 shrink-0 transition-colors disabled:opacity-40"
-          title="Ack = handled. It will not come back."
+          title="Mark read. The card stays in the feed above."
         >
-          {busy ? '…' : 'handled'}
+          {busy ? '…' : 'read'}
         </button>
       )}
     </div>
@@ -318,9 +309,9 @@ function NotifThreadCard({ rows, onAck, onOpen }: { rows: Record<string, unknown
               onClick={async () => { setBusy(true); await onAck(unreadIds); setBusy(false); }}
               disabled={busy}
               className="text-xs text-zinc-500 hover:text-emerald-400 border border-zinc-700 rounded px-2 py-1 transition-colors disabled:opacity-40"
-              title="Ack every update in this thread. They will not come back."
+              title="Mark every update in this thread read. The card stays in the feed above."
             >
-              {busy ? '…' : `Handle ${unreadIds.length}`}
+              {busy ? '…' : `Read ${unreadIds.length}`}
             </button>
           )}
           {total > 1 && (
@@ -808,8 +799,8 @@ export default function InboxPage() {
 
   const refreshAll = useCallback(() => { loadViews(); loadStats(); setTick((t) => t + 1); }, [loadViews, loadStats]);
 
-  async function ackAll() {
-    await reg('/api/v1/notifications/ack', { method: 'POST', body: JSON.stringify({ all: true, surface: 'console' }) });
+  async function readAll() {
+    await reg('/api/v1/inbox/read-all', { method: 'POST' });
     refreshAll();
   }
 
@@ -867,16 +858,18 @@ export default function InboxPage() {
           </p>
         </div>
         <div className="flex items-center gap-2 shrink-0">
-          {(stats?.unread_total ?? 0) > 0 && (
-            <button onClick={ackAll} className="text-sm text-zinc-400 hover:text-white border border-zinc-700 rounded-md px-3 py-1.5 transition-colors">
-              Mark all handled
-            </button>
-          )}
+          <button onClick={readAll} className="text-sm text-zinc-400 hover:text-white border border-zinc-700 rounded-md px-3 py-1.5 transition-colors">
+            Mark all read
+          </button>
           <button onClick={() => setAdding((a) => !a)} className="text-sm text-zinc-300 hover:text-white border border-zinc-600 rounded-md px-3 py-1.5 transition-colors">
             {adding ? 'Close' : '+ Add view'}
           </button>
         </div>
       </div>
+
+      <Feed windowHours={windowHours} refreshTick={tick} />
+
+      <h3 className="border-t border-zinc-800 pt-6 text-xs font-semibold uppercase tracking-wide text-zinc-500">Saved views</h3>
 
       {adding && <ViewBuilder onDone={() => { setAdding(false); refreshAll(); }} onCancel={() => setAdding(false)} />}
 

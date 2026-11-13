@@ -258,6 +258,24 @@ CREATE TABLE IF NOT EXISTS views (
     updated_at       TEXT NOT NULL DEFAULT (datetime('now'))
 );
 
+-- The inbox feed (#1082): one card per ticket, task or doc, with a person's
+-- read and star state kept per card. read_at is when they last read it; NULL
+-- means "never marked", so the epoch decides. The epoch is when their feed
+-- began, or their last "mark all read": activity before it counts as read.
+CREATE TABLE IF NOT EXISTS inbox_marks (
+    identity    TEXT NOT NULL,
+    kind        TEXT NOT NULL,      -- ticket | task | doc
+    object_id   INTEGER NOT NULL,
+    read_at     TEXT,
+    starred     INTEGER NOT NULL DEFAULT 0,
+    PRIMARY KEY (identity, kind, object_id)
+);
+
+CREATE TABLE IF NOT EXISTS inbox_state (
+    identity    TEXT PRIMARY KEY,
+    epoch       TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
 -- Task comments (#203 riff 2026-07-25: tasks get the same comment/metadata
 -- treatment as tickets/docs). Author is bearer-derived, immutable. Fan-out
 -- stays quiet-plane-consistent: assignee + project watchers only.

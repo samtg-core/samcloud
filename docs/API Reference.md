@@ -737,6 +737,16 @@ A mention (`@name`) notifies that member of the ticket's group; `notes` says whe
 
 [Event Bus](Event%20Bus.md) lists the event types.
 
+## Inbox feed
+
+| Method | Path | Auth | Description |
+|---|---|---|---|
+| GET | `/api/v1/inbox/feed` | self | One card per ticket, task or doc, newest activity first, with your read and star state. `?filter=mine` (default) \| `unread` \| `starred` \| `all`, `?kind=ticket,task,doc`, `?window_hours` (default 168), `?group_scope`, `?limit` (50, at most 200) and `?offset` by card. `counts` covers the window before the filter. Reads delivery as it is |
+| POST | `/api/v1/inbox/marks` | self | `{"items": [{"kind", "id"}], "read"?, "starred"?}`: read or unread, starred or not. Reading a card marks your notification rows for that object read |
+| POST | `/api/v1/inbox/read-all` | self | Mark the whole feed read: its epoch moves to now, stars stay, your unread notification rows are marked read |
+
+A card is unread when its latest activity is newer than when you last read it, or than your feed's epoch (your first visit, or your last *read-all*). Your own activity never makes a card unread. Marks are yours alone and notify no one.
+
 ## Views
 
 | Method | Path | Auth | Description |
