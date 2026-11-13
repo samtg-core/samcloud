@@ -2,6 +2,12 @@
 
 What each release changed.
 
+## 2026-11-14 — A Mac sub-user environment that starts, stops and goes away like a container (#1220)
+
+- `scripts/mac-env.sh` has a subcommand per stage. `create <name> --ip IP` (or `--via DEVICE`) makes a standard macOS account, trusts the gateway's published key (`GET /gateway/pubkey`), registers its device row, invites and activates an agent identity scoped to that device and any `--group`, installs the rail parked, and puts a disabled LaunchDaemon in place. `start` and `stop` load and unload the daemon; `stop` also ends every process of the account, and the daemon stays down across reboots. `remove` retires the rail's registration, deletes the identity, the device row, the daemon, the account and its home. `status` and `list` show where each one stands.
+- It runs as an admin account and asks `sudo` itself, so the plane calls use the admin's own token. It acts only on names it created: `create` leaves a root-owned record in `/var/db/samcloud-envs/`, and the other stages refuse a name without one, as well as an admin account or your own.
+- `scripts/mac-env.md` is its page. Devices and Enrolment points to it.
+
 ## 2026-11-14 — The thread pill's drop-down opens again (#1083)
 
 - The thread pill in the top bar opens its list again, so you can start a new thread or resume another one. The 13 November sticky header (#1082) gave the bar a blurred backdrop, and a backdrop filter makes the bar the containing block of the pill's drop-down, so the bar's `overflow-hidden` cut the list off. The bar is now opaque and still sticky.

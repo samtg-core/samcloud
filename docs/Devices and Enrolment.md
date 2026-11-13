@@ -205,6 +205,8 @@ Enrolled is not reachable for work. The bootstrap gives the machine network and 
 
 [Agent Rail](Agent%20Rail.md) covers the rest.
 
+On a Mac, `scripts/mac-env.sh` does all of this for a new sub-user in one step, and starts, stops and removes it like a container ([its page](../scripts/mac-env.md)).
+
 ## Related
 
 - [Identity and Access](Identity%20and%20Access.md): who may enroll and manage a device
