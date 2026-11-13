@@ -53,15 +53,27 @@ The system overview, refreshed every 15 seconds:
 
 ![The inbox](images/inbox.png)
 
-The inbox is a stack of **saved views**: each section is a named filter over live data, and every section is yours to change. The header shows your unread count and how many tickets, docs and tasks moved in the last 24 hours, 7 days or 30 days. **Mark all handled** acknowledges every unread notification; **+ Add view** opens the view builder.
+The inbox is the **feed** on top and your **saved views** below it. The header shows your unread count and how many tickets, docs and tasks moved in the last 24 hours, 7 days or 30 days; the window also sets the feed's. **Mark all read** marks the whole feed and every unread notification read; **+ Add view** opens the view builder.
+
+### The feed
+
+One card per ticket, task or doc, newest activity first. A card shows what happened last (*commented*, *revised*, *created* or *updated*, by whom, when), a preview, its status, project and comment count. A green dot marks it unread, and `@you` a mention of you since you last read it.
+
+- **For me**, the default, is what is relevant to you: a card where something was addressed to you (a mention, an assignment, a reply on something you own or follow), or one assigned to you or yours. It reads delivery as it is: nothing here changes who is notified.
+- **Unread** is the unread among those; **Starred** every card you starred, whatever its age; **Everything** every ticket, task and doc you can see with activity in the window.
+- **tickets · tasks · docs** narrow it by kind, and the scope switch narrows it to a group.
+- **Opening a card** marks it read, and so does **read**. A read card stays in the feed, dimmed, and turns unread again when someone else acts on it; your own activity never does. **unread** puts it back. **☆** stars it.
+- The feed pages by card, 30 at a time (**Show more**), so one busy thread is one card and never pushes the rest off the page. On your first visit, everything already there counts as read.
+
+### Saved views
 
 Each section shows up to 30 items. Its header names the view, its entity, its filters, sort and grouping, with buttons to move it up or down, edit it or delete it; drag a header onto another to reorder. Collapsing a section is remembered in this browser. Deleting a view leaves the data alone.
 
-**Notification views** fold the updates on one ticket, doc or task into one card ("3 updates · latest commented by …"). A card's **Handle** acknowledges every unread update in it, and opening the card does the same. A mention of you stays a card of its own, marked `@you`, with its own **handled** button. Handled means handled: it does not come back.
+**Notification views** fold the updates on one ticket, doc or task into one card ("3 updates · latest commented by …"). A card's **Read N** marks every unread update in it read, and opening the card does the same. A mention of you stays a card of its own, marked `@you`, with its own **read** button. The object stays in the feed above.
 
 **Task rows** carry their status as a control: change it on the card.
 
-### Saved views
+#### Building a view
 
 A view is one entity (tickets, tasks, docs or notifications), a set of filters, a sort, and an optional grouping. Your first visit seeds four, as ordinary views you can edit, rename or delete. If you delete all of them, the next visit seeds them again.
 

@@ -2,6 +2,13 @@
 
 What each release changed.
 
+## 2026-11-13 — The inbox is a feed with read and star (#1082)
+
+- `GET /inbox/feed`: one card per ticket, task or doc, newest activity first, each with what happened last, its comment count and your read and star state. `?filter=mine` (the default: addressed to you by a notification row, assigned to you, or yours), `unread`, `starred` or `all`; `?kind`, `?window_hours`, `?group_scope`, and paging by card. It reads delivery as it is: no one's notifications change, and nothing reaches the rail.
+- `POST /inbox/marks` marks cards read or unread and starred or not; reading one also marks your notification rows for it read. `POST /inbox/read-all` marks the whole feed read and keeps stars. New tables `inbox_marks` and `inbox_state`.
+- The console's inbox leads with the feed: *For me · Unread · Starred · Everything*, *tickets · tasks · docs*, a read/unread toggle and a star per card. A read card stays, dimmed. One busy thread is one card, so it no longer uses up a section's 30 rows. **Mark all handled** is **Mark all read**, and the notification views say *read*.
+- Dashboard, Notifications and Subscriptions and the API Reference describe the feed.
+
 ## 2026-11-13 — Rows wrap instead of being cut off on a phone (#1082)
 
 - The previous release stopped the page panning sideways, which cut off any row that was wider than the screen instead of letting you pan to it. Those rows now wrap: a ticket card's priority, type, filer and assignee line; the New ticket form's selects (two per row on a phone, on the Tickets page and in the ≡ pop-up); the upload group picker on Files; a service's header on Admin › Services.

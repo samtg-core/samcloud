@@ -9299,6 +9299,9 @@ def api_index():
                 "activate": {"method": "POST", "path": "/api/v1/users/activate", "description": "Consume invite, get permanent token"},
                 "guide": {"method": "GET", "path": "/api/v1/users/me/guide", "auth": "self", "description": "Persistent operations guide"},
                 "briefing": {"method": "GET", "path": "/api/v1/users/me/briefing", "auth": "self", "description": "Personal briefing: unread inbox, blocked-on-you, decision-tagged tasks, pick-me menu, windowed movement"},
+                "inbox_feed": {"method": "GET", "path": "/api/v1/inbox/feed", "auth": "self", "description": "The inbox as a feed (#1082): one card per ticket, task or doc, newest activity first, with your read/star state. ?filter=mine (default: addressed to you, assigned or yours) | unread | starred | all; ?kind=ticket,task,doc; ?window_hours (default 168); ?group_scope; ?limit/?offset by card. Reads delivery as it is; changes no one's notifications"},
+                "inbox_marks": {"method": "POST", "path": "/api/v1/inbox/marks", "auth": "self", "description": "{items:[{kind,id}], read?, starred?}: mark feed cards read/unread and starred/unstarred. Reading a card also marks your notification rows for it read"},
+                "inbox_read_all": {"method": "POST", "path": "/api/v1/inbox/read-all", "auth": "self", "description": "Mark the whole feed read: the epoch moves to now, stars stay, your unread notification rows are marked read"},
                 "views": {"method": "GET", "path": "/api/v1/views", "auth": "self", "description": "Saved views: per-user filter definitions; first call seeds four editable defaults. POST to create; PATCH/DELETE /views/{id}; GET /views/{id}/results executes with grouping"},
                 "list": {"method": "GET", "path": "/api/v1/users", "auth": "any", "description": "Admin: everyone; anyone else: self. A group's roster is GET /groups/{id}"},
                 "read": {"method": "GET", "path": "/api/v1/users/{id}", "auth": "any", "description": "Self or admin: the row; a fellow member of any of your groups: name, role, shared groups; otherwise 404"},
@@ -10973,6 +10976,270 @@ def view_results(view_id: int, limit: int = 100, auth: AuthContext = Depends(get
     limit_per_group (the pick-me-menu semantics)."""
     v = _own_view(view_id, auth)
     return _resolve_view(v, auth, cap=max(1, min(limit, 500)))
+
+
+# ===== Inbox feed (#1082) =====
+# The inbox as a feed: one card per ticket, task or doc with activity, newest
+# first, carrying the reader's own read and star state (inbox_marks). It reads
+# what is already recorded — the objects' updated_at, their latest comment or
+# revision, the reader's notification rows — and writes nothing to anyone
+# else's inbox: no audience changes, nothing reaches the rail. Paging is by
+# card, so one busy thread cannot crowd the others out of a page.
+
+_FEED_KINDS = ("ticket", "task", "doc")
+_FEED_FILTERS = ("mine", "unread", "starred", "all")
+_FEED_NEVER_READ = "1970-01-01 00:00:00"   # "mark unread" — older than any activity
+
+
+def _feed_ts(v) -> str:
+    """Rows carry 'YYYY-MM-DD HH:MM:SS' or ISO 'T'; compare them as the former."""
+    return str(v or "").replace("T", " ")[:19]
+
+
+def _feed_epoch(me: str) -> str:
+    db.execute("INSERT OR IGNORE INTO inbox_state (identity) VALUES (?)", (me,))
+    return db.query_one("SELECT epoch FROM inbox_state WHERE identity = ?", (me,))["epoch"]
+
+
+def _feed_latest(table: str, col: str, ids: list, extra: str = "") -> tuple[dict, dict]:
+    """The newest row per object in a comment/revision table, and each object's row count."""
+    if not ids:
+        return {}, {}
+    q = ",".join("?" * len(ids))
+    latest = db.query(
+        f"SELECT {col} AS oid, author, SUBSTR(body, 1, 280) AS body, created_at{extra} FROM {table} "
+        f"WHERE id IN (SELECT MAX(id) FROM {table} WHERE {col} IN ({q}) GROUP BY {col})", tuple(ids))
+    counts = db.query(f"SELECT {col} AS oid, COUNT(*) AS n FROM {table} "
+                      f"WHERE {col} IN ({q}) GROUP BY {col}", tuple(ids))
+    return {r["oid"]: r for r in latest}, {r["oid"]: r["n"] for r in counts}
+
+
+def _feed_activity(row: dict, comment: Optional[dict], revision: Optional[dict] = None) -> dict:
+    """What happened last: a comment, a revision, the creation, or a change."""
+    at = _feed_ts(row.get("updated_at"))
+    if comment and _feed_ts(comment["created_at"]) >= at:
+        return {"what": "commented", "by": comment["author"], "at": comment["created_at"],
+                "text": comment["body"]}
+    if revision and _feed_ts(revision["created_at"]) >= at:
+        what = "created" if revision.get("rev") == 1 else "revised"
+        return {"what": what, "by": revision["author"], "at": revision["created_at"],
+                "text": revision.get("note") or ""}
+    if _feed_ts(row.get("created_at")) >= at:
+        return {"what": "created", "by": row.get("source"), "at": row.get("created_at"),
+                "text": (row.get("body") or row.get("detail") or "")[:280]}
+    # a status, assignee or field change: the record keeps no actor for it
+    return {"what": "updated", "by": None, "at": row.get("updated_at"), "text": ""}
+
+
+def _feed_candidates(auth: AuthContext, kinds, since: str, starred: dict, group_scope: Optional[str]):
+    """Visible objects with activity since `since`, plus every starred one."""
+    out = []
+
+    def _window(alias, kind):
+        ids = starred.get(kind) or []
+        clause = f"(datetime({alias}updated_at) >= datetime('now', ?)"
+        params = [since]
+        if ids:
+            clause += f" OR {alias}id IN ({','.join('?' * len(ids))})"
+            params += ids
+        return clause + ")", params
+
+    if "ticket" in kinds:
+        clause, params = _window("", "ticket")
+        if group_scope:  # the same union as list_tickets (H2, #380)
+            clause += (" AND (group_scope = ? "
+                       "OR device_id IN (SELECT device_id FROM group_devices WHERE group_id = ?) "
+                       "OR service_id IN (SELECT service_id FROM group_services WHERE group_id = ?))")
+            params += [group_scope] * 3
+        rows = [r for r in db.query(f"SELECT * FROM tickets WHERE {clause}", tuple(params))
+                if _can_see_ticket(auth, r)]
+        latest, counts = _feed_latest("ticket_comments", "ticket_id", [r["id"] for r in rows])
+        for r in rows:
+            out.append({"kind": "ticket", "id": r["id"], "title": r["summary"], "status": r["status"],
+                        "priority": r.get("priority"), "href": f"/tickets/{r['id']}",
+                        "group_scope": r.get("group_scope"), "assignee": r.get("assignee"),
+                        "owner": r.get("source"), "created_at": r["created_at"],
+                        "updated_at": r["updated_at"], "comments": counts.get(r["id"], 0),
+                        "latest": _feed_activity(r, latest.get(r["id"]))})
+
+    if "task" in kinds:
+        clause, params = _window("t.", "task")
+        if group_scope:  # tasks ride their project's scope (#330)
+            clause += " AND p.group_scope = ?"
+            params.append(group_scope)
+        rows = db.query("SELECT t.*, p.slug AS project, p.name AS project_name FROM tasks t "
+                        f"JOIN projects p ON p.id = t.project_id WHERE {clause}", tuple(params))
+        seen: dict = {}
+
+        def _see(pid):
+            if pid not in seen:
+                proj = db.query_one("SELECT * FROM projects WHERE id = ?", (pid,))
+                seen[pid] = bool(proj) and _can_see_project(auth, proj)
+            return seen[pid]
+
+        rows = [r for r in rows if _see(r["project_id"])]
+        latest, counts = _feed_latest("task_comments", "task_id", [r["id"] for r in rows])
+        for r in rows:
+            out.append({"kind": "task", "id": r["id"], "title": r["title"], "status": r["status"],
+                        "priority": r.get("priority"), "href": f"/tasks/{r['id']}",
+                        "project": r["project"], "project_name": r["project_name"],
+                        "assignee": r.get("assignee"), "owner": r.get("source"),
+                        "created_at": r["created_at"], "updated_at": r["updated_at"],
+                        "comments": counts.get(r["id"], 0),
+                        "latest": _feed_activity(r, latest.get(r["id"]))})
+
+    if "doc" in kinds:
+        clause, params = _window("", "doc")
+        if group_scope:
+            clause += " AND group_scope = ?"
+            params.append(group_scope)
+        rows = [r for r in db.query(f"SELECT * FROM docs WHERE {clause}", tuple(params))
+                if _can_see_doc(auth, r)]
+        ids = [r["id"] for r in rows]
+        latest, counts = _feed_latest("doc_comments", "doc_id", ids)
+        revs, _ = _feed_latest("doc_revisions", "doc_id", ids, extra=", rev, note")
+        for r in rows:
+            out.append({"kind": "doc", "id": r["id"], "title": r["title"], "status": r["status"],
+                        "doc_kind": r.get("kind"), "href": f"/docs/{r['id']}",
+                        "group_scope": r.get("group_scope"),
+                        "owner": r.get("owner") or r.get("source"),
+                        "created_at": r["created_at"], "updated_at": r["updated_at"],
+                        "comments": counts.get(r["id"], 0),
+                        "latest": _feed_activity(r, latest.get(r["id"]), revs.get(r["id"]))})
+    return out
+
+
+@app.get("/api/v1/inbox/feed")
+def inbox_feed(window_hours: int = 168, kind: Optional[str] = None, filter: str = "mine",
+               group_scope: Optional[str] = None, limit: int = 50, offset: int = 0,
+               auth: AuthContext = Depends(get_auth)):
+    """The inbox feed (#1082): one card per ticket, task or doc, newest
+    activity first, built on delivery as it is — nothing here changes who is
+    notified.
+
+    `filter=mine` (the default) is what is relevant to you: a card with a
+    notification row for you in the window (a mention, an assignment, a reply
+    on something you own or follow), or one assigned to you or yours.
+    `unread` is the unread among those; `starred` every card you starred,
+    whatever its age; `all` every visible card with activity in the window.
+    A card is `unread` when its latest activity is newer than when you last
+    read it (or your feed's epoch, if you never marked it); your own activity
+    never makes it unread. `mention`: a mention of you arrived since you read
+    it. `kind` is a comma list of ticket, task, doc; `counts` covers the
+    window before `filter`."""
+    me = auth.identity()
+    window_hours = max(1, min(int(window_hours or 168), 8760))
+    kinds = [k.strip() for k in (kind or ",".join(_FEED_KINDS)).split(",") if k.strip()]
+    if not kinds or set(kinds) - set(_FEED_KINDS):
+        raise HTTPException(400, f"kind must be a comma list of {', '.join(_FEED_KINDS)}")
+    if filter not in _FEED_FILTERS:
+        raise HTTPException(400, f"filter must be one of {', '.join(_FEED_FILTERS)}")
+    limit = max(1, min(int(limit), 200))
+    offset = max(0, int(offset))
+    since = f"-{window_hours} hours"
+
+    epoch = _feed_epoch(me)
+    marks = {(m["kind"], m["object_id"]): m
+             for m in db.query("SELECT * FROM inbox_marks WHERE identity = ?", (me,))}
+    starred: dict = {}
+    for (k, oid), m in marks.items():
+        if m["starred"]:
+            starred.setdefault(k, []).append(oid)
+
+    # Your own notification rows: what was addressed to you, and when.
+    addressed: dict = {}
+    for n in db.query(
+            "SELECT ticket_id, task_id, doc_id, event_type, created_at FROM notifications "
+            "WHERE recipient = ? AND datetime(created_at) >= datetime('now', ?) "
+            "AND (ticket_id IS NOT NULL OR task_id IS NOT NULL OR doc_id IS NOT NULL)",
+            (me, since)):
+        key = (("ticket", n["ticket_id"]) if n["ticket_id"] else
+               ("task", n["task_id"]) if n["task_id"] else ("doc", n["doc_id"]))
+        addressed.setdefault(key, []).append(n)
+
+    items = _feed_candidates(auth, kinds, since, starred, group_scope)
+    window_start = _feed_ts(db.query_one("SELECT datetime('now', ?) AS t", (since,))["t"])
+    for it in items:
+        key = (it["kind"], it["id"])
+        m = marks.get(key) or {}
+        read_at = _feed_ts(m.get("read_at") or epoch)
+        latest = it["latest"]
+        it["starred"] = bool(m.get("starred"))
+        it["read_at"] = m.get("read_at")
+        it["unread"] = _feed_ts(it["updated_at"]) > read_at and latest.get("by") != me
+        rows = addressed.get(key, [])
+        it["mine"] = bool(rows) or me in (it.get("assignee"), it.get("owner"))
+        it["mention"] = any(r["event_type"].endswith(".mentioned") and _feed_ts(r["created_at"]) > read_at
+                            for r in rows)
+    items.sort(key=lambda it: (_feed_ts(it["updated_at"]), it["kind"], it["id"]), reverse=True)
+
+    def fresh(i):  # starred cards are fetched whatever their age; the rest are in the window
+        return _feed_ts(i["updated_at"]) >= window_start
+
+    keep = {"mine": lambda i: fresh(i) and i["mine"],
+            "unread": lambda i: fresh(i) and i["mine"] and i["unread"],
+            "starred": lambda i: i["starred"],
+            "all": fresh}
+    counts = {f: sum(1 for i in items if keep[f](i)) for f in _FEED_FILTERS}
+    items = [i for i in items if keep[filter](i)]
+    return {"items": items[offset:offset + limit], "total": len(items), "counts": counts,
+            "epoch": epoch, "window_hours": window_hours}
+
+
+class InboxRef(StrictModel):
+    kind: str
+    id: int
+
+
+class InboxMarks(StrictModel):
+    items: list[InboxRef] = Field(..., min_length=1, max_length=500)
+    read: Optional[bool] = None
+    starred: Optional[bool] = None
+
+
+@app.post("/api/v1/inbox/marks")
+def inbox_marks(body: InboxMarks, auth: AuthContext = Depends(get_auth)):
+    """Mark feed cards read or unread, starred or not (#1082). Reading a card
+    also marks your notification rows for that object read, so the unread
+    badge agrees with the feed. Marks are yours alone and reach no one."""
+    if body.read is None and body.starred is None:
+        raise HTTPException(400, "Say read and/or starred")
+    bad = sorted({i.kind for i in body.items} - set(_FEED_KINDS))
+    if bad:
+        raise HTTPException(400, f"Unknown kind {bad} (have: {', '.join(_FEED_KINDS)})")
+    me = auth.identity()
+    notifications_read = 0
+    for i in body.items:
+        db.execute("INSERT OR IGNORE INTO inbox_marks (identity, kind, object_id) VALUES (?, ?, ?)",
+                   (me, i.kind, i.id))
+        if body.read is True:
+            db.execute("UPDATE inbox_marks SET read_at = datetime('now') "
+                       "WHERE identity = ? AND kind = ? AND object_id = ?", (me, i.kind, i.id))
+            notifications_read += db.execute_count(
+                f"UPDATE notifications SET read = 1 WHERE recipient = ? AND {i.kind}_id = ? AND read = 0",
+                (me, i.id))
+        elif body.read is False:
+            db.execute("UPDATE inbox_marks SET read_at = ? "
+                       "WHERE identity = ? AND kind = ? AND object_id = ?",
+                       (_FEED_NEVER_READ, me, i.kind, i.id))
+        if body.starred is not None:
+            db.execute("UPDATE inbox_marks SET starred = ? "
+                       "WHERE identity = ? AND kind = ? AND object_id = ?",
+                       (1 if body.starred else 0, me, i.kind, i.id))
+    return {"updated": len(body.items), "notifications_read": notifications_read}
+
+
+@app.post("/api/v1/inbox/read-all")
+def inbox_read_all(auth: AuthContext = Depends(get_auth)):
+    """Mark the whole feed read (#1082): the epoch moves to now, per-card read
+    marks reset to it (stars stay), and your unread notification rows are
+    marked read."""
+    me = auth.identity()
+    _feed_epoch(me)
+    db.execute("UPDATE inbox_state SET epoch = datetime('now') WHERE identity = ?", (me,))
+    db.execute("UPDATE inbox_marks SET read_at = NULL WHERE identity = ?", (me,))
+    n = db.execute_count("UPDATE notifications SET read = 1 WHERE recipient = ? AND read = 0", (me,))
+    return {"epoch": _feed_epoch(me), "notifications_read": n}
 
 
 @app.get("/api/v1/users/me/briefing")
