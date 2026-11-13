@@ -58,8 +58,7 @@ export function ThumbNav() {
     return () => observer.disconnect();
   }, [pathname]);
 
-  // The header isn't sticky, so "header visible" ≈ scrolled near the top
-  // (#332: only the down caret shows there — you can't go up from the top).
+  // Near the top only the down caret shows (#332: you can't go up from the top).
   useEffect(() => {
     const onScroll = () => setAtTop(window.scrollY < 40);
     onScroll();

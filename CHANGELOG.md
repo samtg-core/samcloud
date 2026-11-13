@@ -2,6 +2,14 @@
 
 What each release changed.
 
+## 2026-11-13 — The console's paper cuts (#1082)
+
+- The Tickets list loads the next 100 as you scroll and says how many of the total are loaded. It used to stop at the newest 100: the registry pages the list and the page asked only for the first. A search, filter or sort other than newest first loads every ticket, so it no longer searches one page. The console proxy passes `X-Total-Count` through.
+- The header stays at the top as you scroll.
+- Nothing widens the page sideways on a phone: `html` and `body` clip horizontal overflow, markdown tables scroll in their own box, long words and URLs wrap, a ticket's assignee and scope pickers wrap onto their own line, and an inbox card's expanded rows truncate as intended.
+- Plane references in markdown (`ticket 1082`, `#1082`, `doc 470`, `task 869`) are links that open in place and show the record's title on hover.
+- Dashboard describes the paging, the sticky header and the reference links.
+
 ## 2026-11-10 — A pair link has a QR and a short code
 
 - `POST /access-keys/pair` also answers `code` (ten characters, like `K7QM2-XHD9P`), `code_url` and `code_command`. `GET /pair/{token}` accepts the code in any case, with or without its dash. Running either form spends both; minting again replaces both (#1068).

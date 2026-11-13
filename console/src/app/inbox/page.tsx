@@ -333,11 +333,13 @@ function NotifThreadCard({ rows, onAck, onOpen }: { rows: Record<string, unknown
       {expanded && total > 1 && (
         <div className="mt-2 space-y-1 border-t border-zinc-800 pt-2">
           {rows.map((r) => (
-            <div key={String(r.id)} className="flex items-baseline gap-2 text-xs">
+            <div key={String(r.id)} className="flex min-w-0 items-baseline gap-2 text-xs">
               <span className={r.read ? 'text-zinc-700' : 'text-emerald-500'}>{r.read ? '·' : '•'}</span>
-              <span className="text-zinc-500">{eventLabel(r)} by {String(r.actor ?? '')}</span>
-              <span className="text-zinc-700">{timeAgo(String(r.created_at))}</span>
-              <span className="text-zinc-400 truncate">{notifSnippet(r)}</span>
+              <span className="text-zinc-500 shrink-0">{eventLabel(r)} by {String(r.actor ?? '')}</span>
+              <span className="text-zinc-700 shrink-0">{timeAgo(String(r.created_at))}</span>
+              {/* min-w-0: a flex item won't shrink below its text without it, so
+                  truncate never fired and one long snippet widened the page (#1082). */}
+              <span className="text-zinc-400 truncate min-w-0">{notifSnippet(r)}</span>
             </div>
           ))}
         </div>

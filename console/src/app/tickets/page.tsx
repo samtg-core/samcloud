@@ -1,13 +1,15 @@
 'use client';
 
 import { timeAgo } from '@/lib/time';
-import { Suspense, useEffect, useState } from 'react';
+import { Suspense, useCallback, useEffect, useRef, useState } from 'react';
 import { useSearchParams } from 'next/navigation';
 import type { Ticket } from '@/lib/registry';
 import { TicketFilters } from './TicketFilters';
 import { CreateTicketForm } from './CreateTicketForm';
 import { useScopeFilter } from '@/lib/scopeFilter';
 
+
+const PAGE = 100;
 
 export default function TicketsPage() {
   // useSearchParams() must sit under a Suspense boundary.
@@ -25,9 +27,10 @@ function TicketsInner() {
   const highlightId = highlightParam ? parseInt(highlightParam, 10) : null;
 
   const [tickets, setTickets] = useState<Ticket[]>([]);
+  const [total, setTotal] = useState<number | null>(null);
   const [loading, setLoading] = useState(true);
-  // #327: as-you-type lookup + assignee filter. Client-side over the loaded
-  // page — the whole open set is ~150 rows, no server round-trip warranted.
+  const [loadingMore, setLoadingMore] = useState(false);
+  // #327: as-you-type lookup + assignee filter, client-side over loaded rows.
   const [q, setQ] = useState('');
   const [assignee, setAssignee] = useState(searchParams.get('assignee') || '');
   const [typeF, setTypeF] = useState('');
@@ -35,30 +38,100 @@ function TicketsInner() {
   const [sortBy, setSortBy] = useState('created:desc');
   const scope = useScopeFilter();  // H2 (#380): global top-level scope narrow
 
-  useEffect(() => {
-    let alive = true;
+  // #1082: the list is paged (100 a page, newest first) and used to show only
+  // the first page — scrolling stopped at ticket ~983 of 1082. Now the next
+  // page loads as you near the bottom, and a search, filter or sort other than
+  // newest-first loads the rest so it covers every ticket, not just a page.
+  // `gen` drops a response that lands after the status or scope changed.
+  const gen = useRef(0);
+  const count = useRef(0);
+  const busy = useRef(false);
+  const sentinel = useRef<HTMLDivElement>(null);
+
+  const fetchPage = useCallback(async (offset: number, limit: number) => {
     // Via the proxy (forwards the session token; registry scopes by
     // _can_see_ticket). /api/v1/tickets requires auth — no token = 401 = empty.
+    const qs = new URLSearchParams({ limit: String(limit), offset: String(offset) });
+    if (filterStatus) qs.set('status', filterStatus);
+    if (scope) qs.set('group_scope', scope);
+    const res = await fetch(`/api/registry?path=${encodeURIComponent(`/api/v1/tickets?${qs}`)}`, { cache: 'no-store' });
+    const data = res.ok ? await res.json() : [];
+    const t = Number(res.headers.get('x-total-count'));
+    return { rows: (Array.isArray(data) ? data : []) as Ticket[], total: Number.isFinite(t) && t > 0 ? t : null };
+  }, [filterStatus, scope]);
+
+  // Newest first, the registry's own order; a refreshed row replaces its old copy.
+  const merge = useCallback((rows: Ticket[], reset = false) => {
+    setTickets((prev) => {
+      const byId = new Map((reset ? [] : prev).map((t) => [t.id, t]));
+      for (const r of rows) byId.set(r.id, r);
+      const next = [...byId.values()].sort((a, b) =>
+        String(b.created_at).localeCompare(String(a.created_at)) || b.id - a.id);
+      count.current = next.length;
+      return next;
+    });
+  }, []);
+
+  useEffect(() => {
+    const g = ++gen.current;
+    let first = true;
     async function load() {
-      const qs = new URLSearchParams();
-      if (filterStatus) qs.set('status', filterStatus);
-      if (scope) qs.set('group_scope', scope);
-      const path = '/api/v1/tickets' + (qs.toString() ? `?${qs.toString()}` : '');
       try {
-        const res = await fetch(`/api/registry?path=${encodeURIComponent(path)}`, { cache: 'no-store' });
-        const data = res.ok ? await res.json() : [];
-        if (alive) setTickets(Array.isArray(data) ? data : []);
+        const { rows, total: t } = await fetchPage(0, PAGE);
+        if (g !== gen.current) return;
+        merge(rows, first);
+        setTotal(t ?? rows.length);
+        first = false;
       } catch {
-        if (alive) setTickets([]);
+        if (g === gen.current && first) { setTickets([]); count.current = 0; }
       } finally {
-        if (alive) setLoading(false);
+        if (g === gen.current) setLoading(false);
       }
     }
     setLoading(true);
+    setTotal(null);
     load();
-    const id = setInterval(load, 15000);  // matches old revalidate=15
-    return () => { alive = false; clearInterval(id); };
-  }, [filterStatus, scope]);
+    const id = setInterval(load, 15000);  // matches old revalidate=15; refreshes the first page
+    return () => { clearInterval(id); };
+  }, [fetchPage, merge]);
+
+  const loadMore = useCallback(async (limit: number) => {
+    if (busy.current || total === null || count.current >= total) return;
+    busy.current = true;
+    setLoadingMore(true);
+    const g = gen.current;
+    try {
+      const { rows, total: t } = await fetchPage(count.current, limit);
+      if (g !== gen.current) return;
+      merge(rows);
+      if (t !== null) setTotal(t);
+    } catch {
+      /* the sentinel or the next filter change retries */
+    } finally {
+      busy.current = false;
+      setLoadingMore(false);
+    }
+  }, [fetchPage, merge, total]);
+
+  const needle = q.trim().toLowerCase();
+  const needAll = Boolean(needle || assignee || typeF || priorityF || sortBy !== 'created:desc');
+  const complete = total !== null && tickets.length >= total;
+
+  // Search, filters and sorts read every ticket: fetch the rest in big pages.
+  useEffect(() => {
+    if (needAll && !loading && !loadingMore && !complete) loadMore(500);
+  }, [needAll, loading, loadingMore, complete, loadMore]);
+
+  // Otherwise the next page loads as the bottom of the list comes into view.
+  useEffect(() => {
+    const el = sentinel.current;
+    if (!el || complete) return;
+    const io = new IntersectionObserver((entries) => {
+      if (entries.some((e) => e.isIntersecting)) loadMore(PAGE);
+    }, { rootMargin: '800px 0px' });
+    io.observe(el);
+    return () => io.disconnect();
+  }, [complete, loadMore, loading]);
 
   return (
     <div className="max-w-4xl mx-auto space-y-8">
@@ -126,7 +199,6 @@ function TicketsInner() {
             Loading…
           </div>
         ) : (() => {
-          const needle = q.trim().toLowerCase();
           const PRIO = { critical: 0, high: 1, medium: 2, med: 2, low: 3 } as Record<string, number>;
           const shown = tickets.filter(t => {
             if (assignee && t.assignee !== assignee) return false;
@@ -152,11 +224,19 @@ function TicketsInner() {
             ))
           ) : (
             <div className="rounded-lg border border-zinc-800 bg-zinc-900/50 p-8 text-center text-zinc-600 text-sm">
-              {needle || assignee ? 'Nothing matches the current search/filter' :
+              {needAll && !complete ? 'Searching every ticket…' :
+                needle || assignee ? 'Nothing matches the current search/filter' :
                 filterStatus ? `No tickets with status "${filterStatus}"` : 'No tickets found'}
             </div>
           );
         })()}
+        {!loading && total !== null && (
+          <div ref={sentinel} className="py-2 text-center text-xs text-zinc-600">
+            {complete
+              ? `All ${total} tickets loaded`
+              : `${tickets.length} of ${total} loaded${loadingMore ? ' · loading more…' : ''}`}
+          </div>
+        )}
       </div>
     </div>
   );
