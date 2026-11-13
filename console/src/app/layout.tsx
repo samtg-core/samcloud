@@ -35,7 +35,9 @@ export default function RootLayout({
         className={`${geistSans.variable} ${geistMono.variable} antialiased min-h-screen bg-zinc-950 text-zinc-100`}
       >
         <div className="flex min-h-screen flex-col">
-          <header className="sticky top-0 z-40 border-b border-zinc-800 bg-zinc-950/95 backdrop-blur px-4 sm:px-6 py-3 sm:py-4 overflow-hidden">
+          {/* Opaque, not backdrop-blur: a backdrop filter makes the header the containing block of the
+              thread pill's fixed drop-down, and overflow-hidden then cuts it off (#1083). */}
+          <header className="sticky top-0 z-40 border-b border-zinc-800 bg-zinc-950 px-4 sm:px-6 py-3 sm:py-4 overflow-hidden">
             <div className="flex items-center gap-4">
               <h1 className="text-xl font-semibold tracking-tight shrink-0">
                 <span className="text-zinc-400">sam</span>cloud
