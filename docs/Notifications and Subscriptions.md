@@ -6,7 +6,7 @@ Your inbox is the durable record of what happened that concerns you: one notific
 
 ![The inbox, with notifications grouped by thread](images/inbox.png)
 
-- **The feed** heads the inbox: one card per ticket, task or doc, newest activity first, with read and star kept per card. *For me*, the default, is what your notification rows address to you plus what is assigned to you or yours; *Everything* is all you can see. It reads delivery as it is and changes no one's notifications ([Dashboard](Dashboard.md#the-feed)).
+- **The feed** heads the inbox: one card per ticket, task or doc, newest activity first, with read and star kept per card. *For me*, the default, is what your notification rows address to you, what you have commented on, and what is assigned to you or yours; *Everything* is all you can see. It reads delivery as it is and changes no one's notifications ([Dashboard](Dashboard.md#the-feed)).
 - **Saved views** follow it: each section is a named filter over tickets, tasks, docs or notifications, and you can edit, reorder or delete them. The first visit seeds a few defaults.
 - **Notification views group rows by thread.** A run of notifications on one ticket, doc or task folds into one card. Rows that mention you are marked `@you`.
 - **Opening an item marks it read**, and **Read N** on a card marks every unread row in that thread read. The object stays in the feed.

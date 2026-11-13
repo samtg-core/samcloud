@@ -146,3 +146,24 @@ def test_bad_input_is_refused(client):
     assert client.post('/api/v1/inbox/marks', json={'items': [{'kind': 'ticket', 'id': 1}]}).status_code == 400
     assert client.post('/api/v1/inbox/marks', json={'items': [{'kind': 'x', 'id': 1}], 'read': True}).status_code == 400
     assert client.post('/api/v1/inbox/marks', json={'items': [], 'read': True}).status_code == 422
+
+
+def test_a_card_you_commented_on_is_yours_and_a_reply_unreads_it(client):
+    """A comment does not subscribe its writer, so the reply reaches no inbox
+    row of sam's; the feed shows it under For me all the same."""
+    sam = user(client, 'sam', {'home': 'editor'})
+    user(client, 'worker', {'home': 'editor'})
+    start_feed(sam)
+    p = client.post('/api/v1/projects', json={'name': 'Work', 'group_scope': 'home'}).json()
+    k = client.post(f"/api/v1/projects/{p['slug']}/tasks", json={'title': 'onboard', 'assignee': 'worker'}).json()
+    assert ('task', k['id']) not in cards(feed(sam))
+    sam.post(f"/api/v1/tasks/{k['id']}/comments", json={'body': 'how is it going?'})
+    body = feed(sam)
+    assert cards(body) == [('task', k['id'])] and body['items'][0]['joined']
+    assert not body['items'][0]['unread']                  # your own comment
+    sam.post('/api/v1/inbox/marks', json={'items': [{'kind': 'task', 'id': k['id']}], 'read': True})
+    db.execute("UPDATE inbox_marks SET read_at = datetime('now', '-5 minutes')")
+    client.post(f"/api/v1/tasks/{k['id']}/comments", json={'body': 'nearly there'})
+    assert db.query_one("SELECT COUNT(*) AS n FROM notifications WHERE recipient = 'sam'")['n'] == 0
+    item = feed(sam)['items'][0]
+    assert item['unread'] and item['latest']['text'] == 'nearly there'

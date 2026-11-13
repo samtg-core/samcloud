@@ -11120,7 +11120,8 @@ def inbox_feed(window_hours: int = 168, kind: Optional[str] = None, filter: str 
 
     `filter=mine` (the default) is what is relevant to you: a card with a
     notification row for you in the window (a mention, an assignment, a reply
-    on something you own or follow), or one assigned to you or yours.
+    on something you own or follow), one you have commented on (`joined`),
+    or one assigned to you or yours.
     `unread` is the unread among those; `starred` every card you starred,
     whatever its age; `all` every visible card with activity in the window.
     A card is `unread` when its latest activity is newer than when you last
@@ -11159,6 +11160,17 @@ def inbox_feed(window_hours: int = 168, kind: Optional[str] = None, filter: str 
         addressed.setdefault(key, []).append(n)
 
     items = _feed_candidates(auth, kinds, since, starred, group_scope)
+    # Where you have commented counts as yours: a comment does not subscribe
+    # its writer (delivery stays as it is), so replies on a task you joined
+    # reach no inbox of yours. The feed shows them anyway (#1082: 189 replies
+    # on 10 tasks Sam had commented on, 14 days to 2026-11-13).
+    joined: set = set()
+    for k, table in (("ticket", "ticket_comments"), ("task", "task_comments"), ("doc", "doc_comments")):
+        ids = [i["id"] for i in items if i["kind"] == k]
+        if ids:
+            joined |= {(k, r["oid"]) for r in db.query(
+                f"SELECT DISTINCT {k}_id AS oid FROM {table} WHERE author = ? "
+                f"AND {k}_id IN ({','.join('?' * len(ids))})", (me, *ids))}
     window_start = _feed_ts(db.query_one("SELECT datetime('now', ?) AS t", (since,))["t"])
     for it in items:
         key = (it["kind"], it["id"])
@@ -11169,7 +11181,8 @@ def inbox_feed(window_hours: int = 168, kind: Optional[str] = None, filter: str 
         it["read_at"] = m.get("read_at")
         it["unread"] = _feed_ts(it["updated_at"]) > read_at and latest.get("by") != me
         rows = addressed.get(key, [])
-        it["mine"] = bool(rows) or me in (it.get("assignee"), it.get("owner"))
+        it["joined"] = key in joined
+        it["mine"] = bool(rows) or it["joined"] or me in (it.get("assignee"), it.get("owner"))
         it["mention"] = any(r["event_type"].endswith(".mentioned") and _feed_ts(r["created_at"]) > read_at
                             for r in rows)
     items.sort(key=lambda it: (_feed_ts(it["updated_at"]), it["kind"], it["id"]), reverse=True)

@@ -749,7 +749,7 @@ Each item carries `kind`, `id`, `title`, `status`, `href`, `ref` (a markdown lin
 
 | Method | Path | Auth | Description |
 |---|---|---|---|
-| GET | `/api/v1/inbox/feed` | self | One card per ticket, task or doc, newest activity first, with your read and star state. `?filter=mine` (default) \| `unread` \| `starred` \| `all`, `?kind=ticket,task,doc`, `?window_hours` (default 168), `?group_scope`, `?limit` (50, at most 200) and `?offset` by card. `counts` covers the window before the filter. Reads delivery as it is |
+| GET | `/api/v1/inbox/feed` | self | One card per ticket, task or doc, newest activity first, with your read and star state. `?filter=mine` (default: addressed to you, commented on by you, assigned to you or yours) \| `unread` \| `starred` \| `all`, `?kind=ticket,task,doc`, `?window_hours` (default 168), `?group_scope`, `?limit` (50, at most 200) and `?offset` by card. `counts` covers the window before the filter. Reads delivery as it is |
 | POST | `/api/v1/inbox/marks` | self | `{"items": [{"kind", "id"}], "read"?, "starred"?}`: read or unread, starred or not. Reading a card marks your notification rows for that object read |
 | POST | `/api/v1/inbox/read-all` | self | Mark the whole feed read: its epoch moves to now, stars stay, your unread notification rows are marked read |
 
