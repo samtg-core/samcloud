@@ -27,10 +27,12 @@ Four pages work before you sign in. Every other page sends you to `/login` first
 
 ## Around every page
 
-The header carries:
+The header stays at the top of the screen as you scroll. It carries:
 - **The scope switch** (`all scopes`, or one of your groups). Picking a group narrows the Tickets, Docs and Projects lists to it, and turns amber so a narrowed view is never mistaken for the whole.
 - **The thread switch.** Everything you create in the dashboard joins one thread, the way a session does. It shows the current thread as `#id title`, or *new thread* when the next thing you create will start one. Pick *New thread* for a fresh conversation, or resume one of the open threads listed. [Agent Rail](Agent%20Rail.md) explains threads and conversations.
 - **Dashboard, Inbox, Admin, Tickets, Docs, Projects**, your username and **Logout**. Inbox carries your unread count.
+
+Wherever markdown is shown (ticket, doc and task bodies and comments), a plane reference is a link: `ticket 1082`, `#1082`, `doc 470` and `task 869` open that page, and hovering one shows its title. A bare `#N` needs two or more digits and is never read after *PR*. A wide table scrolls inside its own box, and a long word or URL wraps, so nothing pushes the page sideways on a phone.
 
 In the bottom-right corner, **≡** opens quick actions: *New ticket*, *New doc*, *New task*, *Upload file* and *Jump to inbox*, with the unread count. On pages with comments or sections, the arrows beside it step to the next or previous one; a double-click jumps to the bottom or top.
 
@@ -102,7 +104,7 @@ curl -s -X DELETE $PLANE/views/7 -H @"$HOME/.samcloud/token.hdr"
 
 ![Tickets](images/tickets.png)
 
-The list refreshes every 15 seconds. Narrow it by status (*All*, open, triaged, in progress, resolved), search it by id, summary, body or anyone involved, filter by assignee, type and priority, and sort by created, updated or priority. **New Ticket** takes a summary, a type, a priority, an assignee, a group (by default, yours) and details.
+The list shows the newest 100 tickets and loads the next 100 as you scroll near the bottom; the line under it says how many of the total are loaded. The first page refreshes every 15 seconds. Narrow it by status (*All*, open, triaged, in progress, resolved), search it by id, summary, body or anyone involved, filter by assignee, type and priority, and sort by created, updated or priority. A search, a filter or a sort other than newest first loads every ticket first, so it covers them all. **New Ticket** takes a summary, a type, a priority, an assignee, a group (by default, yours) and details.
 
 ![A ticket](images/ticket.png)
 

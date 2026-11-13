@@ -86,7 +86,13 @@ async function proxyRequest(request: NextRequest, method: string) {
       session.threadTitle = data.summary || data.title || undefined;
       await session.save();
     }
-    return NextResponse.json(data, { status: res.status });
+    // Paged lists (#190) report their full size in X-Total-Count; pass it on
+    // so a page can say "N of M" and keep loading (#1082).
+    const total = res.headers.get('x-total-count');
+    return NextResponse.json(data, {
+      status: res.status,
+      headers: total ? { 'X-Total-Count': total } : undefined,
+    });
   } catch (error) {
     return NextResponse.json(
       { error: 'Registry unreachable', detail: String(error) },

@@ -238,14 +238,16 @@ export default function TicketDetailPage({ params }: { params: Promise<{ id: str
         {ticket.status === 'closed' && (
           <button onClick={() => patchTicket({ status: 'open' })} className="rounded-md bg-blue-600 px-3 py-1.5 text-xs font-medium text-white hover:bg-blue-500">Reopen</button>
         )}
-        <div className="flex items-center gap-2 ml-auto">
+        {/* flex-wrap + min-w-0 selects: on a phone the scope picker drops to its
+            own line instead of running off the side of the page (#1082). */}
+        <div className="flex flex-wrap items-center gap-2 ml-auto min-w-0">
           <label htmlFor="assignee" className="text-xs text-zinc-500">Assignee</label>
           {/* "" unassigns: the registry treats empty assignee as unset. */}
           <select
             id="assignee"
             value={ticket.assignee || ''}
             onChange={e => patchTicket({ assignee: e.target.value })}
-            className="rounded-md border border-zinc-700 bg-zinc-800 px-2 py-1.5 text-xs text-zinc-100 focus:border-blue-500 focus:outline-none"
+            className="min-w-0 max-w-full rounded-md border border-zinc-700 bg-zinc-800 px-2 py-1.5 text-xs text-zinc-100 focus:border-blue-500 focus:outline-none"
           >
             <option value="">Unassigned</option>
             {ticket.assignee && !users.includes(ticket.assignee) && (
@@ -261,7 +263,7 @@ export default function TicketDetailPage({ params }: { params: Promise<{ id: str
             value={ticket.group_scope || ''}
             onChange={e => patchTicket({ group_scope: e.target.value })}
             title="Who can see this ticket"
-            className="rounded-md border border-zinc-700 bg-zinc-800 px-2 py-1.5 text-xs text-zinc-100 focus:border-blue-500 focus:outline-none"
+            className="min-w-0 max-w-full rounded-md border border-zinc-700 bg-zinc-800 px-2 py-1.5 text-xs text-zinc-100 focus:border-blue-500 focus:outline-none"
           >
             {ticket.group_scope && !scopeGroups.includes(ticket.group_scope) && (
               <option value={ticket.group_scope}>{ticket.group_scope}</option>

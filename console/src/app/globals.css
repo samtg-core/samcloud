@@ -23,7 +23,22 @@ body {
   background: var(--background);
   color: var(--foreground);
   font-family: Arial, Helvetica, sans-serif;
-  overflow-x: hidden;
+}
+
+/* #1082: nothing may widen the page sideways. `hidden` on body alone still
+   let iOS Safari pan horizontally when an expanded row or a wide table
+   overflowed; `clip` on both stops the pan without making either a scroll
+   container, so the sticky header keeps sticking. */
+html, body {
+  overflow-x: clip;
+}
+
+/* The header is sticky (#1082): anchors and block-step targets land below it. */
+html {
+  scroll-padding-top: 4.5rem;
+}
+[data-block] {
+  scroll-margin-top: 4.5rem;
 }
 
 /* Prevent iOS zoom on input focus */
