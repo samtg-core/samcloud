@@ -286,7 +286,7 @@ function TicketCard({ ticket, highlighted }: { ticket: Ticket; highlighted: bool
             {ticket.body && (
               <p className="text-sm text-zinc-400 line-clamp-2">{ticket.body}</p>
             )}
-            <div className="flex items-center gap-3 text-xs text-zinc-500">
+            <div className="flex flex-wrap items-center gap-x-3 gap-y-1 text-xs text-zinc-500">
               <span>{ticket.priority}</span>
               <span>{ticket.type}</span>
               <span>from {ticket.source}</span>

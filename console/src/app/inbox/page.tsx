@@ -332,17 +332,35 @@ function NotifThreadCard({ rows, onAck, onOpen }: { rows: Record<string, unknown
       </div>
       {expanded && total > 1 && (
         <div className="mt-2 space-y-1 border-t border-zinc-800 pt-2">
-          {rows.map((r) => (
-            <div key={String(r.id)} className="flex min-w-0 items-baseline gap-2 text-xs">
-              <span className={r.read ? 'text-zinc-700' : 'text-emerald-500'}>{r.read ? '·' : '•'}</span>
-              <span className="text-zinc-500 shrink-0">{eventLabel(r)} by {String(r.actor ?? '')}</span>
-              <span className="text-zinc-700 shrink-0">{timeAgo(String(r.created_at))}</span>
-              {/* min-w-0: a flex item won't shrink below its text without it, so
-                  truncate never fired and one long snippet widened the page (#1082). */}
-              <span className="text-zinc-400 truncate min-w-0">{notifSnippet(r)}</span>
-            </div>
-          ))}
+          {rows.map((r) => <ExpandedRow key={String(r.id)} r={r} />)}
         </div>
+      )}
+    </div>
+  );
+}
+
+// One update in an expanded card. The snippet wraps under its header, three
+// lines at most; a tap shows all of it. (#1082: truncating it to one line left
+// no way to read the rest of the row on a phone.)
+function ExpandedRow({ r }: { r: Record<string, unknown> }) {
+  const [full, setFull] = useState(false);
+  const text = notifSnippet(r);
+  return (
+    <div className="min-w-0 text-xs">
+      <div className="flex flex-wrap items-baseline gap-x-2">
+        <span className={r.read ? 'text-zinc-700' : 'text-emerald-500'}>{r.read ? '·' : '•'}</span>
+        <span className="text-zinc-500">{eventLabel(r)} by {String(r.actor ?? '')}</span>
+        <span className="text-zinc-700">{timeAgo(String(r.created_at))}</span>
+      </div>
+      {text && (
+        <button
+          type="button"
+          onClick={() => setFull((f) => !f)}
+          title={full ? 'Show less' : 'Show all of it'}
+          className={`block w-full pl-3 text-left whitespace-pre-line text-zinc-400 [overflow-wrap:anywhere] ${full ? '' : 'line-clamp-3'}`}
+        >
+          {text}
+        </button>
       )}
     </div>
   );

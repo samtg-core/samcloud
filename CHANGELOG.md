@@ -2,6 +2,12 @@
 
 What each release changed.
 
+## 2026-11-13 — Rows wrap instead of being cut off on a phone (#1082)
+
+- The previous release stopped the page panning sideways, which cut off any row that was wider than the screen instead of letting you pan to it. Those rows now wrap: a ticket card's priority, type, filer and assignee line; the New ticket form's selects (two per row on a phone, on the Tickets page and in the ≡ pop-up); the upload group picker on Files; a service's header on Admin › Services.
+- An inbox card's expanded updates show up to three lines each under their header, and a tap shows the whole update. They had been cut to one line.
+- The tables on Admin, Admin › Devices and a group's admin page scroll sideways inside their own box.
+
 ## 2026-11-13 — The console's paper cuts (#1082)
 
 - The Tickets list loads the next 100 as you scroll and says how many of the total are loaded. It used to stop at the newest 100: the registry pages the list and the page asked only for the first. A search, filter or sort other than newest first loads every ticket, so it no longer searches one page. The console proxy passes `X-Total-Count` through.

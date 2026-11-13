@@ -117,11 +117,13 @@ export function NewTicketModal({ onClose }: { onClose: () => void }) {
             className="w-full rounded-lg border border-zinc-800 bg-zinc-950 px-3 py-2 text-sm text-zinc-100 placeholder-zinc-600 focus:border-zinc-600 focus:outline-none"
           />
 
-          <div className="flex gap-3">
+          {/* Two per row on a phone: a select is as wide as its longest option,
+              so one long assignee list ran off the screen (#1082). */}
+          <div className="grid grid-cols-2 gap-3 sm:flex">
             <select
               name="type"
               defaultValue="bug"
-              className="flex-1 rounded-lg border border-zinc-800 bg-zinc-950 px-3 py-2 text-sm text-zinc-100 focus:border-zinc-600 focus:outline-none"
+              className="min-w-0 flex-1 rounded-lg border border-zinc-800 bg-zinc-950 px-3 py-2 text-sm text-zinc-100 focus:border-zinc-600 focus:outline-none"
             >
               <option value="bug">Bug</option>
               <option value="feature">Feature</option>
@@ -131,7 +133,7 @@ export function NewTicketModal({ onClose }: { onClose: () => void }) {
             <select
               name="priority"
               defaultValue="medium"
-              className="flex-1 rounded-lg border border-zinc-800 bg-zinc-950 px-3 py-2 text-sm text-zinc-100 focus:border-zinc-600 focus:outline-none"
+              className="min-w-0 flex-1 rounded-lg border border-zinc-800 bg-zinc-950 px-3 py-2 text-sm text-zinc-100 focus:border-zinc-600 focus:outline-none"
             >
               <option value="critical">Critical</option>
               <option value="high">High</option>
@@ -141,7 +143,7 @@ export function NewTicketModal({ onClose }: { onClose: () => void }) {
             <select
               name="assignee"
               defaultValue=""
-              className="flex-1 rounded-lg border border-zinc-800 bg-zinc-950 px-3 py-2 text-sm text-zinc-100 focus:border-zinc-600 focus:outline-none"
+              className="min-w-0 flex-1 rounded-lg border border-zinc-800 bg-zinc-950 px-3 py-2 text-sm text-zinc-100 focus:border-zinc-600 focus:outline-none"
             >
               <option value="">Unassigned</option>
               {users.map(u => <option key={u} value={u}>{u}</option>)}

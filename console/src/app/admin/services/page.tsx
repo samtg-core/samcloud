@@ -222,9 +222,9 @@ export default function ServicesPage() {
           <div className="space-y-2">
             {active.map(svc => (
               <div key={svc.id} className="rounded-lg border border-zinc-800 bg-zinc-900/50 p-4">
-                <div className="flex items-center justify-between mb-2">
+                <div className="flex flex-wrap items-center justify-between gap-2 mb-2">
                   <span className="font-mono text-zinc-200 font-medium">{svc.name}</span>
-                  <div className="flex items-center gap-3">
+                  <div className="flex flex-wrap items-center gap-3">
                     <span className="text-xs text-zinc-500">{svc.device_id}</span>
                     <StatusBadge status={svc.status} lastHealth={svc.last_health} />
                     <button onClick={() => handleDelete(svc.id)}
