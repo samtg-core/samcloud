@@ -2,6 +2,10 @@
 
 What each release changed.
 
+## 2026-11-14 — The thread pill's drop-down opens again (#1083)
+
+- The thread pill in the top bar opens its list again, so you can start a new thread or resume another one. The 13 November sticky header (#1082) gave the bar a blurred backdrop, and a backdrop filter makes the bar the containing block of the pill's drop-down, so the bar's `overflow-hidden` cut the list off. The bar is now opaque and still sticky.
+
 ## 2026-11-13 — Search across tickets, tasks and docs (#1082)
 
 - `GET /search?q=` finds tickets, tasks and docs you can see by every word of the query in their title, body or comments, or by id (`#1082`). One filter vocabulary for all three: `kind`, `status` (with `active` for work still moving), `assignee` (`:me`), `group_scope`, `tag`, `updated_hours`. Ranked id, title, body, comment; paged; each hit has a snippet and a ready `ref` link. Until now only `GET /docs?q=` searched, and only titles.
