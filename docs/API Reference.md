@@ -737,6 +737,14 @@ A mention (`@name`) notifies that member of the ticket's group; `notes` says whe
 
 [Event Bus](Event%20Bus.md) lists the event types.
 
+## Search
+
+| Method | Path | Auth | Description |
+|---|---|---|---|
+| GET | `/api/v1/search` | any | Tickets, tasks and docs you can see whose title, body or comments hold every word of `?q` (case-insensitive; `#N` or `N` also matches that id). `?kind=ticket,task,doc`, `?status` (comma list; `active` = open/triaged/in-progress tickets, todo/in-progress/blocked tasks, draft/active docs), `?assignee` (`:me`; a doc's owner), `?group_scope`, `?tag` (tickets and tasks), `?updated_hours`, `?limit` (30, at most 100), `?offset` |
+
+Each item carries `kind`, `id`, `title`, `status`, `href`, `ref` (a markdown link), `assignee`, `project`, `group_scope`, `updated_at`, `match` (`id`, `title`, `body` or `comment`) and `snippet`; the answer adds `total` and per-kind `counts`. Ranked by id, then title, body and comment matches, newest first within. With no `q`, the filters alone apply, newest first.
+
 ## Inbox feed
 
 | Method | Path | Auth | Description |
