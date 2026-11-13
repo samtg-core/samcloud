@@ -60,7 +60,7 @@ The inbox is the **feed** on top and your **saved views** below it. The header s
 
 One card per ticket, task or doc, newest activity first. A card shows what happened last (*commented*, *revised*, *created* or *updated*, by whom, when), a preview, its status, project and comment count. A green dot marks it unread, and `@you` a mention of you since you last read it.
 
-- **For me**, the default, is what is relevant to you: a card where something was addressed to you (a mention, an assignment, a reply on something you own or follow), or one assigned to you or yours. It reads delivery as it is: nothing here changes who is notified.
+- **For me**, the default, is what is relevant to you: a card where something was addressed to you (a mention, an assignment, a reply on something you own or follow), one you have commented on, or one assigned to you or yours. Commenting does not subscribe you, so replies on a task you joined reach no inbox row; they show here. It reads delivery as it is: nothing here changes who is notified.
 - **Unread** is the unread among those; **Starred** every card you starred, whatever its age; **Everything** every ticket, task and doc you can see with activity in the window.
 - **tickets · tasks · docs** narrow it by kind, and the scope switch narrows it to a group.
 - **Opening a card** marks it read, and so does **read**. A read card stays in the feed, dimmed, and turns unread again when someone else acts on it; your own activity never does. **unread** puts it back. **☆** stars it.

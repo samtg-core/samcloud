@@ -2,6 +2,10 @@
 
 What each release changed.
 
+## 2026-11-13 — The feed shows what you have commented on (#1082)
+
+- `GET /inbox/feed?filter=mine` also includes tickets, tasks and docs you have commented on, with `joined: true`; a reply from someone else makes the card unread. Delivery is unchanged: a comment still does not subscribe its writer, so these replies reach no inbox row. In the 14 days to 2026-11-13, 189 replies on 10 tasks Sam had commented on reached no inbox of his.
+
 ## 2026-11-13 — Search across tickets, tasks and docs (#1082)
 
 - `GET /search?q=` finds tickets, tasks and docs you can see by every word of the query in their title, body or comments, or by id (`#1082`). One filter vocabulary for all three: `kind`, `status` (with `active` for work still moving), `assignee` (`:me`), `group_scope`, `tag`, `updated_hours`. Ranked id, title, body, comment; paged; each hit has a snippet and a ready `ref` link. Until now only `GET /docs?q=` searched, and only titles.
