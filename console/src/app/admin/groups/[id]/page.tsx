@@ -296,7 +296,7 @@ export default function GroupDetailPage() {
         </h3>
 
         {group.services.length > 0 ? (
-          <div className="rounded-lg border border-zinc-800 bg-zinc-900/50 overflow-hidden">
+          <div className="rounded-lg border border-zinc-800 bg-zinc-900/50 overflow-x-auto">
             <table className="w-full text-sm">
               <thead>
                 <tr className="border-b border-zinc-800 text-left text-xs text-zinc-500">
@@ -370,7 +370,7 @@ export default function GroupDetailPage() {
         </h3>
 
         {groupDevices.length > 0 ? (
-          <div className="rounded-lg border border-zinc-800 bg-zinc-900/50 overflow-hidden">
+          <div className="rounded-lg border border-zinc-800 bg-zinc-900/50 overflow-x-auto">
             <table className="w-full text-sm">
               <thead>
                 <tr className="border-b border-zinc-800 text-left text-xs text-zinc-500">
@@ -444,7 +444,7 @@ export default function GroupDetailPage() {
         </h3>
 
         {group.members.length > 0 ? (
-          <div className="rounded-lg border border-zinc-800 bg-zinc-900/50 overflow-hidden">
+          <div className="rounded-lg border border-zinc-800 bg-zinc-900/50 overflow-x-auto">
             <table className="w-full text-sm">
               <thead>
                 <tr className="border-b border-zinc-800 text-left text-xs text-zinc-500">

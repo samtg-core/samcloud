@@ -224,7 +224,7 @@ export default function AdminPage() {
         <h3 className="text-lg font-semibold text-zinc-100">Users</h3>
 
         {users.length > 0 ? (
-          <div className="rounded-lg border border-zinc-800 bg-zinc-900/50 overflow-hidden">
+          <div className="rounded-lg border border-zinc-800 bg-zinc-900/50 overflow-x-auto">
             <table className="w-full text-sm">
               <thead>
                 <tr className="border-b border-zinc-800 text-left text-xs text-zinc-500">

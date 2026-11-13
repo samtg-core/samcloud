@@ -121,7 +121,7 @@ export default function FilesPage() {
           className="hidden"
           onChange={(e) => upload(e.target.files)}
         />
-        <div className="flex items-center justify-center gap-3">
+        <div className="flex flex-wrap items-center justify-center gap-3">
           <button
             onClick={() => inputRef.current?.click()}
             disabled={busy}
@@ -133,7 +133,7 @@ export default function FilesPage() {
             value={scope}
             onChange={(e) => setScope(e.target.value)}
             title="Visibility scope applied to the next upload"
-            className="rounded-md border border-zinc-700 bg-zinc-900 px-2 py-2 text-xs text-zinc-300 focus:border-zinc-500 focus:outline-none"
+            className="min-w-0 max-w-full rounded-md border border-zinc-700 bg-zinc-900 px-2 py-2 text-xs text-zinc-300 focus:border-zinc-500 focus:outline-none"
           >
             <option value="">commons (all agents)</option>
             {groups.map((g) => <option key={g} value={g}>group: {g}</option>)}

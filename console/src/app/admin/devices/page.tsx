@@ -404,7 +404,7 @@ export default function DevicesPage() {
       {accessKeys.length > 0 && (
         <div className="space-y-4">
           <h3 className="text-lg font-semibold text-zinc-100">Access Keys ({accessKeys.length})</h3>
-          <div className="rounded-lg border border-zinc-800 bg-zinc-900/50 overflow-hidden">
+          <div className="rounded-lg border border-zinc-800 bg-zinc-900/50 overflow-x-auto">
             <table className="w-full text-sm">
               <thead><tr className="border-b border-zinc-800 text-left text-xs text-zinc-500">
                 <th className="px-4 py-3">User</th><th className="px-4 py-3">Device</th><th className="px-4 py-3 hidden sm:table-cell">Public Key</th><th className="px-4 py-3 hidden md:table-cell">Created</th>
