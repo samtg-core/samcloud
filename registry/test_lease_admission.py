@@ -125,6 +125,9 @@ def test_only_resource_uniqueness_failure_translates_to_409(client, resource, mo
     class Connection:
         def __init__(self, conn):
             self.conn = conn
+        @property
+        def in_transaction(self):
+            return self.conn.in_transaction
         def execute(self, sql, params=()):
             if sql.startswith('INSERT INTO leases'):
                 if message is not None:

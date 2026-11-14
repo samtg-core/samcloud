@@ -474,6 +474,54 @@ CREATE TABLE IF NOT EXISTS lease_rollovers (
     created_at TEXT NOT NULL
 );
 
+-- One durable operation spanning ordinary per-resource queues. No TTL on the
+-- group: member expiry does not prove that its provider stopped using memory.
+CREATE TABLE IF NOT EXISTS lease_groups (
+    sequence INTEGER PRIMARY KEY AUTOINCREMENT,
+    id TEXT NOT NULL UNIQUE,
+    owner_id TEXT NOT NULL,
+    request_key TEXT NOT NULL,
+    intent_sha256 TEXT NOT NULL,
+    intent_json TEXT NOT NULL,
+    phase TEXT NOT NULL CHECK(phase IN
+        ('pending','acquiring','admitted','serving','releasing','uncertain','released','cancelled')),
+    generation INTEGER NOT NULL DEFAULT 1 CHECK(generation > 0),
+    release_requested INTEGER NOT NULL DEFAULT 0,
+    reason TEXT,
+    serving_evidence TEXT,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    UNIQUE(owner_id, request_key)
+);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_lease_groups_one_acquiring
+    ON lease_groups((1))
+    WHERE phase IN ('acquiring','admitted','serving','releasing','uncertain');
+
+CREATE TABLE IF NOT EXISTS lease_group_members (
+    group_id TEXT NOT NULL REFERENCES lease_groups(id),
+    ordinal INTEGER NOT NULL,
+    resource_id TEXT NOT NULL,
+    -- Keep the binding even if an administrator deletes a resource/lease. A
+    -- missing receipt becomes uncertain; it must never become a fresh request.
+    lease_id TEXT UNIQUE,
+    cleanup_evidence TEXT,
+    release_receipt TEXT,
+    PRIMARY KEY(group_id, ordinal),
+    UNIQUE(group_id, resource_id)
+);
+CREATE TABLE IF NOT EXISTS lease_group_events (
+    sequence INTEGER PRIMARY KEY AUTOINCREMENT,
+    group_id TEXT NOT NULL REFERENCES lease_groups(id),
+    generation INTEGER NOT NULL,
+    kind TEXT NOT NULL,
+    phase TEXT NOT NULL,
+    actor TEXT NOT NULL,
+    data TEXT NOT NULL,
+    created_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_lease_group_events_group
+    ON lease_group_events(group_id, sequence);
+
 -- ===== Indexes =====
 CREATE INDEX IF NOT EXISTS idx_resources_device ON resources(device_id);
 CREATE INDEX IF NOT EXISTS idx_resources_type ON resources(type);

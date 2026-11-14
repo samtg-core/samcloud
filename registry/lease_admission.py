@@ -194,17 +194,24 @@ def reap_and_promote(db, *, default_ttl):
     waiters that now fit, in one write transaction. Returns what to publish."""
     with db.transaction() as conn:
         conn.execute('BEGIN IMMEDIATE')
-        now_dt = datetime.now(timezone.utc)
-        touched, expired_waits, expired_holds = reap(conn, now_dt.isoformat())
-        if expired_waits:
-            for rid in {w['resource_id'] for w in expired_waits}:
-                _renumber(conn, rid)
-        promoted, invalid = [], []
-        for rid in touched:
-            resource = conn.execute('SELECT * FROM resources WHERE id=?', (rid,)).fetchone()
-            if resource is not None:
-                promoted.extend(promote(conn, resource, now_dt, default_ttl=default_ttl,
-                                        invalid=invalid))
+        return reap_and_promote_in_transaction(conn, default_ttl=default_ttl)
+
+
+def reap_and_promote_in_transaction(conn, *, default_ttl):
+    """Reap/promote inside a caller-owned transaction; publish after its commit."""
+    if not conn.in_transaction:
+        raise RuntimeError('lease refresh requires a caller-owned write transaction')
+    now_dt = datetime.now(timezone.utc)
+    touched, expired_waits, expired_holds = reap(conn, now_dt.isoformat())
+    if expired_waits:
+        for rid in {w['resource_id'] for w in expired_waits}:
+            _renumber(conn, rid)
+    promoted, invalid = [], []
+    for rid in touched:
+        resource = conn.execute('SELECT * FROM resources WHERE id=?', (rid,)).fetchone()
+        if resource is not None:
+            promoted.extend(promote(conn, resource, now_dt, default_ttl=default_ttl,
+                                    invalid=invalid))
     return {'promoted': promoted, 'wait_expired': expired_waits, 'expired': expired_holds,
             'invalid': invalid}
 
@@ -221,40 +228,47 @@ def release(db, lease, *, default_ttl):
     """
     with db.transaction() as conn:
         conn.execute('BEGIN IMMEDIATE')
-        now_dt = datetime.now(timezone.utc)
-        now = now_dt.isoformat()
-        touched, expired_waits, expired_holds = reap(conn, now)
-        for rid in {w['resource_id'] for w in expired_waits}:
-            _renumber(conn, rid)
-        cur = conn.execute("SELECT status, expiry_reason, settled_at FROM leases WHERE id=?",
-                           (lease['id'],)).fetchone()
-        status = cur['status'] if cur is not None else lease.get('status')
-        # A holder releases; a waiter cancels; an expired holder is settled. Three
-        # words for three facts a reader of the row needs to tell apart.
-        changed = 0
-        if status == 'queued':
-            final = 'cancelled'
-            changed = conn.execute("UPDATE leases SET status='cancelled', released_at=?, "
-                                   "queue_position=NULL WHERE id=? AND status='queued'",
-                                   (now, lease['id'])).rowcount
-            _renumber(conn, lease['resource_id'])
-        elif status == 'active':
-            final = 'released'
-            changed = conn.execute("UPDATE leases SET status='released', released_at=? "
-                                   "WHERE id=? AND status='active'", (now, lease['id'])).rowcount
-        elif (status == 'expired' and cur is not None and cur['expiry_reason'] == 'ttl_expired'
-              and not cur['settled_at']):
-            final = 'settled'
-            changed = conn.execute("UPDATE leases SET settled_at=?, released_at=? WHERE id=? "
-                                   "AND status='expired' AND settled_at IS NULL",
-                                   (now, now, lease['id'])).rowcount
-        else:
-            final = status or 'released'        # already over: idempotent, nothing moves
-        resource = conn.execute('SELECT * FROM resources WHERE id=?',
-                                (lease['resource_id'],)).fetchone()
-        promoted, invalid = [], []
-        if resource is not None:
-            promoted = promote(conn, resource, now_dt, default_ttl=default_ttl, invalid=invalid)
+        return release_in_transaction(conn, lease, default_ttl=default_ttl)
+
+
+def release_in_transaction(conn, lease, *, default_ttl):
+    """The same release/settlement, without committing the caller's transaction."""
+    if not conn.in_transaction:
+        raise RuntimeError('lease release requires a caller-owned write transaction')
+    now_dt = datetime.now(timezone.utc)
+    now = now_dt.isoformat()
+    touched, expired_waits, expired_holds = reap(conn, now)
+    for rid in {w['resource_id'] for w in expired_waits}:
+        _renumber(conn, rid)
+    cur = conn.execute("SELECT status, expiry_reason, settled_at FROM leases WHERE id=?",
+                       (lease['id'],)).fetchone()
+    status = cur['status'] if cur is not None else lease.get('status')
+    # A holder releases; a waiter cancels; an expired holder is settled. Three
+    # words for three facts a reader of the row needs to tell apart.
+    changed = 0
+    if status == 'queued':
+        final = 'cancelled'
+        changed = conn.execute("UPDATE leases SET status='cancelled', released_at=?, "
+                               "queue_position=NULL WHERE id=? AND status='queued'",
+                               (now, lease['id'])).rowcount
+        _renumber(conn, lease['resource_id'])
+    elif status == 'active':
+        final = 'released'
+        changed = conn.execute("UPDATE leases SET status='released', released_at=? "
+                               "WHERE id=? AND status='active'", (now, lease['id'])).rowcount
+    elif (status == 'expired' and cur is not None and cur['expiry_reason'] == 'ttl_expired'
+          and not cur['settled_at']):
+        final = 'settled'
+        changed = conn.execute("UPDATE leases SET settled_at=?, released_at=? WHERE id=? "
+                               "AND status='expired' AND settled_at IS NULL",
+                               (now, now, lease['id'])).rowcount
+    else:
+        final = status or 'released'        # already over: idempotent, nothing moves
+    resource = conn.execute('SELECT * FROM resources WHERE id=?',
+                            (lease['resource_id'],)).fetchone()
+    promoted, invalid = [], []
+    if resource is not None:
+        promoted = promote(conn, resource, now_dt, default_ttl=default_ttl, invalid=invalid)
     return {'released': bool(changed), 'status': final, 'promoted': promoted,
             'wait_expired': expired_waits, 'expired': expired_holds, 'invalid': invalid}
 
@@ -267,132 +281,149 @@ def reserve(db, resource_id, req, agent_id, *, default_ttl, total_floor, total_h
     """
     with db.transaction() as conn:
         conn.execute('BEGIN IMMEDIATE')
-        # The clock reads inside the serialized section, so created_at orders the
-        # queue the way the writers were serialized: positions handed back are
-        # unique and never reshuffle under a racer that read the clock earlier.
-        now_dt = datetime.now(timezone.utc)
-        now = now_dt.isoformat()
-        resource = conn.execute('SELECT * FROM resources WHERE id=?', (resource_id,)).fetchone()
-        if resource is None:
-            raise HTTPException(404, f'Resource {resource_id} not found')
-        # #492: reap expired rows before checking the next reservation. The
-        # waiters that now fit are granted first — they were here before us.
-        expired_holds = conn.execute(
-            "SELECT id, resource_id, service_id, agent_id, memory_mb, exclusive FROM leases "
-            "WHERE resource_id=? AND status='active' AND expires_at IS NOT NULL AND expires_at < ?",
-            (resource_id, now)).fetchall()
-        for h in expired_holds:
-            conn.execute("UPDATE leases SET status='expired', expiry_reason='ttl_expired' "
-                         "WHERE id=?", (h['id'],))
-        expired_waits = conn.execute(
-            "SELECT id, resource_id, service_id, agent_id FROM leases WHERE resource_id=? AND "
-            "status='queued' AND expires_at IS NOT NULL AND expires_at < ?",
-            (resource_id, now)).fetchall()
-        for w in expired_waits:
-            conn.execute("UPDATE leases SET status='expired', expiry_reason='wait_expired', "
-                         "queue_position=NULL WHERE id=?", (w['id'],))
-        invalid = []
-        promoted = promote(conn, resource, now_dt, default_ttl=default_ttl, invalid=invalid)
-        metadata = {'promoted': promoted, 'wait_expired': [dict(w) for w in expired_waits],
-                    'expired': [dict(h) for h in expired_holds], 'invalid': invalid}
-        # #849: an unknown service is a named 422, not an INSERT-time FK 500.
-        if req.service_id and not conn.execute('SELECT 1 FROM services WHERE id=?',
-                                                (req.service_id,)).fetchone():
-            raise HTTPException(422, f"service_id '{req.service_id}' is not a registered "
-                                 'service; omit it, or use an id from GET /api/v1/services')
-        # Active rows and, on a `hold` resource, expired holders nobody has settled.
-        active = occupying(conn, resource)
-        if any(type(r['memory_mb']) is not int or r['memory_mb'] < 0
-               for r in active if r['memory_mb'] is not None):
-            raise HTTPException(409, {'code': 'invalid_existing_allocation'})
-        total = capacity_of(resource)
-        # #806: resource-declared exclusivity applies even if not requested.
-        exclusive = bool(req.exclusive) or resource['allocation_mode'] == 'exclusive'
-        if req.memory_mb and req.memory_mb > total:
-            # Never queued: it could never be granted, and at the head of the
-            # queue it would block everyone behind it until its wait ran out.
-            raise HTTPException(409, {
-                'code': 'exceeds_capacity', 'requested_mb': req.memory_mb, 'total_mb': total,
-                'detail': f'{req.memory_mb} MB can never be granted on a {total} MB resource'})
-        available = total - sum(r['memory_mb'] or 0 for r in active)
-        waiting = conn.execute("SELECT COUNT(*) FROM leases WHERE resource_id=? AND "
-                               "status='queued'", (resource_id,)).fetchone()[0]
-        holder = next((r for r in active if r['exclusive']), None)
-        refusal = None
-        if holder is not None:
-            refusal = HTTPException(409, {
-                'detail': f"Exclusive lease held by {holder['service_id']}",
-                'held_by': holder['service_id'], 'expires_at': holder['expires_at']})
-        elif exclusive and active:
-            refusal = HTTPException(409, 'Cannot grant exclusive lease — active leases exist')
-        elif req.memory_mb and req.memory_mb > available:
-            refusal = 'over_bytes'
-        elif waiting:
-            # It would fit, but somebody ahead did not. Strict order: a newcomer
-            # does not jump a waiter.
-            refusal = HTTPException(409, {
-                'code': 'queue_ahead', 'queue_length': waiting,
-                'detail': f'{waiting} request(s) are queued ahead on {resource_id}; '
-                          f'pass wait_s to join the queue'})
-        lease_id = f'lease_{secrets.token_hex(8)}'
-        duration = req.effective_duration_s()
-        asked_total = max(int(req.max_total_s or 0), int(duration or 0), total_floor)
-        max_total = min(asked_total, total_hard)
-        if refusal is not None:
-            wait_s = req.wait_s
-            # `wait: true` with no `wait_s` is a wait with no deadline
-            # (no timeouts as a default at any layer). expires_at stays NULL, which the
-            # reaper never selects; the row leaves the queue by promotion or by its
-            # holder's DELETE. With `wait_s` as well, the deadline stands.
-            indefinite = bool(getattr(req, 'wait', None)) and wait_s is None
-            if wait_s is None and not indefinite and refusal == 'over_bytes':
-                wait_s = DEFAULT_WAIT_S        # the legacy answer, now bounded
-            if wait_s is None and not indefinite:
-                raise refusal
-            wait_until = None if indefinite else (now_dt + timedelta(seconds=wait_s)).isoformat()
-            position = waiting + 1
-            conn.execute('INSERT INTO leases (id,resource_id,service_id,agent_id,memory_mb,'
-                         'exclusive,priority,status,queue_position,created_at,expires_at,'
-                         'ttl_s,max_total_s) '
-                         "VALUES (?,?,?,?,?,?,?,'queued',?,?,?,?,?)",
-                         (lease_id, resource_id, req.service_id, agent_id, req.memory_mb,
-                          int(exclusive), req.priority, position, now, wait_until,
-                          duration, max_total))
-            _renumber(conn, resource_id)
-            position = conn.execute('SELECT queue_position FROM leases WHERE id=?',
-                                    (lease_id,)).fetchone()[0]
-            return ({'lease_id': lease_id, 'status': 'queued', 'queue_position': position,
-                     'wait_until': wait_until, 'available_mb': available,
-                     'requested_mb': req.memory_mb}, metadata)
-        defaulted = exclusive and not duration
-        # #827: default finite mutex TTL; preserve the grant's renewal ceiling.
-        if defaulted:
-            duration = default_ttl
-        expires = (now_dt + timedelta(seconds=duration)).isoformat() if duration else None
-        try:
-            conn.execute('INSERT INTO leases (id,resource_id,service_id,agent_id,memory_mb,'
-                         'exclusive,priority,status,granted_at,expires_at,created_at,'
-                         'max_total_s,ttl_s) '
-                         "VALUES (?,?,?,?,?,?,?,'active',?,?,?,?,?)",
-                         (lease_id, resource_id, req.service_id, agent_id, req.memory_mb,
-                          int(exclusive), req.priority, now, expires, now, max_total,
-                          duration))
-        except sqlite3.IntegrityError as exc:
-            # #806/#849: retain the schema backstop's 409 contract. SQLite names
-            # the column, not the index. Do not mask other integrity failures.
-            if str(exc) != 'UNIQUE constraint failed: leases.resource_id':
-                raise
-            holder = conn.execute("SELECT service_id,expires_at FROM leases WHERE "
-                                  "resource_id=? AND exclusive=1 AND status='active'",
-                                  (resource_id,)).fetchone()
-            holder = dict(holder) if holder is not None else {}
-            raise HTTPException(409, {
-                'detail': f"Exclusive lease held by {holder.get('service_id', 'unknown')}",
-                'held_by': holder.get('service_id'),
-                'expires_at': holder.get('expires_at')}) from None
-        metadata.update({'ttl_defaulted': defaulted,
-                         'max_total_clamped': asked_total if asked_total > total_hard else None})
-        return ({'lease_id': lease_id, 'status': 'active', 'granted_at': now,
-                 'expires_at': expires, 'max_total_s': max_total,
-                 'resource_available_mb': available - (req.memory_mb or 0)},
-                metadata)
+        return reserve_in_transaction(
+            conn, resource_id, req, agent_id, default_ttl=default_ttl,
+            total_floor=total_floor, total_hard=total_hard)
+
+
+def reserve_in_transaction(conn, resource_id, req, agent_id, *, default_ttl,
+                           total_floor, total_hard):
+    """Reserve through the ordinary queue in a caller-owned write transaction.
+
+    The caller must hold BEGIN IMMEDIATE. This function never begins, commits,
+    rolls back or publishes: a group can persist its intent and member leases
+    atomically, without calling the HTTP endpoint or nesting transactions.
+    Returned metadata must be published only after the outer commit succeeds.
+    Authorization remains the caller's responsibility, as for reserve().
+    """
+    if not conn.in_transaction:
+        raise RuntimeError('lease admission requires a caller-owned write transaction')
+    # The clock reads inside the serialized section, so created_at orders the
+    # queue the way the writers were serialized: positions handed back are
+    # unique and never reshuffle under a racer that read the clock earlier.
+    now_dt = datetime.now(timezone.utc)
+    now = now_dt.isoformat()
+    resource = conn.execute('SELECT * FROM resources WHERE id=?', (resource_id,)).fetchone()
+    if resource is None:
+        raise HTTPException(404, f'Resource {resource_id} not found')
+    # #492: reap expired rows before checking the next reservation. The
+    # waiters that now fit are granted first — they were here before us.
+    expired_holds = conn.execute(
+        "SELECT id, resource_id, service_id, agent_id, memory_mb, exclusive FROM leases "
+        "WHERE resource_id=? AND status='active' AND expires_at IS NOT NULL AND expires_at < ?",
+        (resource_id, now)).fetchall()
+    for h in expired_holds:
+        conn.execute("UPDATE leases SET status='expired', expiry_reason='ttl_expired' "
+                     "WHERE id=?", (h['id'],))
+    expired_waits = conn.execute(
+        "SELECT id, resource_id, service_id, agent_id FROM leases WHERE resource_id=? AND "
+        "status='queued' AND expires_at IS NOT NULL AND expires_at < ?",
+        (resource_id, now)).fetchall()
+    for w in expired_waits:
+        conn.execute("UPDATE leases SET status='expired', expiry_reason='wait_expired', "
+                     "queue_position=NULL WHERE id=?", (w['id'],))
+    invalid = []
+    promoted = promote(conn, resource, now_dt, default_ttl=default_ttl, invalid=invalid)
+    metadata = {'promoted': promoted, 'wait_expired': [dict(w) for w in expired_waits],
+                'expired': [dict(h) for h in expired_holds], 'invalid': invalid}
+    # #849: an unknown service is a named 422, not an INSERT-time FK 500.
+    if req.service_id and not conn.execute('SELECT 1 FROM services WHERE id=?',
+                                            (req.service_id,)).fetchone():
+        raise HTTPException(422, f"service_id '{req.service_id}' is not a registered "
+                             'service; omit it, or use an id from GET /api/v1/services')
+    # Active rows and, on a `hold` resource, expired holders nobody has settled.
+    active = occupying(conn, resource)
+    if any(type(r['memory_mb']) is not int or r['memory_mb'] < 0
+           for r in active if r['memory_mb'] is not None):
+        raise HTTPException(409, {'code': 'invalid_existing_allocation'})
+    total = capacity_of(resource)
+    # #806: resource-declared exclusivity applies even if not requested.
+    exclusive = bool(req.exclusive) or resource['allocation_mode'] == 'exclusive'
+    if req.memory_mb and req.memory_mb > total:
+        # Never queued: it could never be granted, and at the head of the
+        # queue it would block everyone behind it until its wait ran out.
+        raise HTTPException(409, {
+            'code': 'exceeds_capacity', 'requested_mb': req.memory_mb, 'total_mb': total,
+            'detail': f'{req.memory_mb} MB can never be granted on a {total} MB resource'})
+    available = total - sum(r['memory_mb'] or 0 for r in active)
+    waiting = conn.execute("SELECT COUNT(*) FROM leases WHERE resource_id=? AND "
+                           "status='queued'", (resource_id,)).fetchone()[0]
+    holder = next((r for r in active if r['exclusive']), None)
+    refusal = None
+    if holder is not None:
+        refusal = HTTPException(409, {
+            'detail': f"Exclusive lease held by {holder['service_id']}",
+            'held_by': holder['service_id'], 'expires_at': holder['expires_at']})
+    elif exclusive and active:
+        refusal = HTTPException(409, 'Cannot grant exclusive lease — active leases exist')
+    elif req.memory_mb and req.memory_mb > available:
+        refusal = 'over_bytes'
+    elif waiting:
+        # It would fit, but somebody ahead did not. Strict order: a newcomer
+        # does not jump a waiter.
+        refusal = HTTPException(409, {
+            'code': 'queue_ahead', 'queue_length': waiting,
+            'detail': f'{waiting} request(s) are queued ahead on {resource_id}; '
+                      f'pass wait_s to join the queue'})
+    lease_id = f'lease_{secrets.token_hex(8)}'
+    duration = req.effective_duration_s()
+    asked_total = max(int(req.max_total_s or 0), int(duration or 0), total_floor)
+    max_total = min(asked_total, total_hard)
+    if refusal is not None:
+        wait_s = req.wait_s
+        # `wait: true` with no `wait_s` is a wait with no deadline
+        # (no timeouts as a default at any layer). expires_at stays NULL, which the
+        # reaper never selects; the row leaves the queue by promotion or by its
+        # holder's DELETE. With `wait_s` as well, the deadline stands.
+        indefinite = bool(getattr(req, 'wait', None)) and wait_s is None
+        if wait_s is None and not indefinite and refusal == 'over_bytes':
+            wait_s = DEFAULT_WAIT_S        # the legacy answer, now bounded
+        if wait_s is None and not indefinite:
+            raise refusal
+        wait_until = None if indefinite else (now_dt + timedelta(seconds=wait_s)).isoformat()
+        position = waiting + 1
+        conn.execute('INSERT INTO leases (id,resource_id,service_id,agent_id,memory_mb,'
+                     'exclusive,priority,status,queue_position,created_at,expires_at,'
+                     'ttl_s,max_total_s) '
+                     "VALUES (?,?,?,?,?,?,?,'queued',?,?,?,?,?)",
+                     (lease_id, resource_id, req.service_id, agent_id, req.memory_mb,
+                      int(exclusive), req.priority, position, now, wait_until,
+                      duration, max_total))
+        _renumber(conn, resource_id)
+        position = conn.execute('SELECT queue_position FROM leases WHERE id=?',
+                                (lease_id,)).fetchone()[0]
+        return ({'lease_id': lease_id, 'status': 'queued', 'queue_position': position,
+                 'wait_until': wait_until, 'available_mb': available,
+                 'requested_mb': req.memory_mb}, metadata)
+    defaulted = exclusive and not duration
+    # #827: default finite mutex TTL; preserve the grant's renewal ceiling.
+    if defaulted:
+        duration = default_ttl
+    expires = (now_dt + timedelta(seconds=duration)).isoformat() if duration else None
+    try:
+        conn.execute('INSERT INTO leases (id,resource_id,service_id,agent_id,memory_mb,'
+                     'exclusive,priority,status,granted_at,expires_at,created_at,'
+                     'max_total_s,ttl_s) '
+                     "VALUES (?,?,?,?,?,?,?,'active',?,?,?,?,?)",
+                     (lease_id, resource_id, req.service_id, agent_id, req.memory_mb,
+                      int(exclusive), req.priority, now, expires, now, max_total,
+                      duration))
+    except sqlite3.IntegrityError as exc:
+        # #806/#849: retain the schema backstop's 409 contract. SQLite names
+        # the column, not the index. Do not mask other integrity failures.
+        if str(exc) != 'UNIQUE constraint failed: leases.resource_id':
+            raise
+        holder = conn.execute("SELECT service_id,expires_at FROM leases WHERE "
+                              "resource_id=? AND exclusive=1 AND status='active'",
+                              (resource_id,)).fetchone()
+        holder = dict(holder) if holder is not None else {}
+        raise HTTPException(409, {
+            'detail': f"Exclusive lease held by {holder.get('service_id', 'unknown')}",
+            'held_by': holder.get('service_id'),
+            'expires_at': holder.get('expires_at')}) from None
+    metadata.update({'ttl_defaulted': defaulted,
+                     'max_total_clamped': asked_total if asked_total > total_hard else None})
+    return ({'lease_id': lease_id, 'status': 'active', 'granted_at': now,
+             'expires_at': expires, 'max_total_s': max_total,
+             'resource_available_mb': available - (req.memory_mb or 0)},
+            metadata)

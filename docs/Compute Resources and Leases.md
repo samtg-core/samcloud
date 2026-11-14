@@ -113,6 +113,73 @@ Health is worked out from the last stats push: the higher of memory use and comp
 
 ## Leasing
 
+### One operation across several hosts
+
+`POST /api/v1/lease-groups` records an immutable request spanning 2–16 distinct
+hosts. Supply a stable `request_key` and an ordered `members` list; each member
+names `resource_id`, an explicit positive `ttl_seconds`, and optional `memory_mb`,
+`service_id` and `max_total_s`. Every resource must use `expiry_policy: hold`.
+All members are exclusive, normal-priority requests through the ordinary host
+queues, with `wait: true` and no wait deadline. No new queue priority is granted.
+`memory_mb` records the declared envelope, still checked against the resource's
+capacity; it is not measured resident memory. Exclusive ownership blocks all
+other allocations even if numeric capacity-minus-claim fields show a remainder.
+
+```json
+{"request_key":"pipeline-run-1","members":[
+  {"resource_id":"box-1/gpu-0","memory_mb":48000,"ttl_seconds":600},
+  {"resource_id":"box-2/gpu-0","memory_mb":27000,"ttl_seconds":600}
+]}
+```
+
+A repeated key with the same intent returns the same group and member lease ids,
+including after release. A different intent under that key answers `409`. The
+intent, member bindings and durable events commit in one transaction. Audit and
+live events publish only afterwards. Recover lost responses by reading the
+group, never by inventing a new key.
+
+Only one group at a time may acquire or occupy hosts. Groups wait FIFO without
+holding any member while `pending`; ordinary single-host callers keep using
+their queues. The acquiring group first queues its first declared member, which
+should be the host with the longest expected wait. It requests later members
+only once the first is active. `POST /lease-groups/{id}/advance` continues that
+acquisition after a normal lease event; reads never acquire another host. A
+partly admitted group owns only its granted members and must not serve yet.
+
+Every command supplies the current `generation`. The group phases are `pending`,
+`acquiring`, `admitted`, `serving`, `releasing`, `uncertain`, `released` and
+`cancelled`. `POST /{id}/serving` accepts only when **all** members are active.
+It also requires `evidence_ref` and a lowercase 64-character `evidence_sha256`.
+These are an attributed provider attestation, not independent registry proof
+that workers are loaded. Providers must check exact membership, authority and
+generation before loading or serving; this API does not start processes.
+
+`POST /{id}/release` cancels queued members, but retains granted ones for cleanup.
+After observing its workers stop, the holder posts the same evidence fields to
+`POST /{id}/members/{lease_id}/release`. This settles that exact ordinary lease
+and stores its receipt atomically with the attestation. A replay preserves the
+original evidence. A member that expires under HOLD remains charged; elapsed
+time never proves cleanup. Missing lease rows or missing cleanup receipts leave
+the group `uncertain`, blocking a new group acquisition. Ordinary `DELETE
+/leases/{id}` still works, but alone cannot supply a group's cleanup evidence.
+
+`POST /{id}/fence` takes `generation` and `reason`, advances the generation and
+starts draining. It rejects commands from an older coordinator; it does not kill
+a worker or prove that its memory is free. A replacement coordinator can finish
+cleanup using the current generation without erasing prior receipts.
+
+The owner and admin may mutate the group. Other readers must see every member
+resource; seeing one host is insufficient. Fresh acquisition and serving also
+require current access to all hosts. The owner retains read/cleanup access after
+losing host visibility. Durable history is available at `GET /{id}/events?after=N`
+(default limit 100, maximum 500); SSE is a notification to reconcile that record.
+
+There is no group, assembly or idle timeout. Member renewal uses the existing
+`POST /leases/{id}/renew` and its existing ceiling; a group does not remove that
+ceiling. Exclusive rollover and provider lifecycle integration are not supplied
+by this API. A long-lived deployment must resolve those limits before relying
+on uninterrupted service beyond a member's ceiling.
+
 ### Ask for a lease
 
 ```bash

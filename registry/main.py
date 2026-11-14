@@ -138,6 +138,7 @@ from lease_admission import reserve as reserve_lease
 from lease_admission import (release as release_lease_rows, reap_and_promote as reap_leases,
                              queue_view as lease_queue_view, unsettled_view as lease_unsettled_view,
                              UNSETTLED as LEASE_UNSETTLED)
+import lease_groups
 import ports as port_alloc
 import scope as groupscope   # scope v1 (doc 261) — aliased: many routes hold a local `scope` string
 
@@ -1013,6 +1014,34 @@ class LeaseRenew(StrictModel):
     # span the lease was granted with, which is lost after the first renewal
     # unless it is stored. A holder restating what it wants infers nothing (#827).
     ttl_seconds: int
+
+
+class LeaseGroupMember(StrictModel):
+    resource_id: str = Field(min_length=1, max_length=256)
+    service_id: Optional[str] = None
+    memory_mb: Optional[int] = Field(default=None, strict=True, ge=0)
+    # Explicit renewable member lifetime. No group or assembly deadline.
+    ttl_seconds: int = Field(strict=True, gt=0)
+    max_total_s: Optional[int] = Field(default=None, strict=True, gt=0)
+
+
+class LeaseGroupRequest(StrictModel):
+    request_key: str = Field(min_length=1, max_length=128)
+    members: list[LeaseGroupMember] = Field(min_length=2, max_length=16)
+
+
+class LeaseGroupCommand(StrictModel):
+    generation: int = Field(strict=True, gt=0)
+
+
+class LeaseGroupAttestation(LeaseGroupCommand):
+    # An immutable reference and digest, not raw logs, credentials or prompts.
+    evidence_ref: str = Field(min_length=1, max_length=512)
+    evidence_sha256: str = Field(pattern=r"^[a-f0-9]{64}$")
+
+
+class LeaseGroupFence(LeaseGroupCommand):
+    reason: str = Field(min_length=1, max_length=512)
 
 
 class TicketUpdate(StrictModel):
@@ -3955,6 +3984,10 @@ def _can_see_event(auth: AuthContext, event) -> bool:
         uid = groupscope._user_id(target)
         row = db.query_one("SELECT username FROM users WHERE id = ?", (uid,)) if uid else None
         return bool(row) and row["username"] == auth.identity()
+    if event.type.startswith("lease_group."):
+        group = db.query_one("SELECT * FROM lease_groups WHERE id=?",
+                             (event.data.get("group_id") or target,))
+        return bool(group) and _can_see_lease_group(auth, group)
     if event.type.startswith(("resource.", "lease.")):
         resource_id = event.data.get("resource_id") or target
         resource = db.query_one("SELECT device_id FROM resources WHERE id = ?", (resource_id,))
@@ -9334,6 +9367,16 @@ def api_index():
                 "rollover": {"method": "POST", "path": "/api/v1/leases/{id}/rollover", "auth": "holder/admin and resource manager", "description": "Explicit atomic replacement of a finite shared positive-memory allocation; same holder/resource/bytes, body {key,ttl_seconds}; persisted key required, conflicting replay is 409. TTL cannot exceed the predecessor exposure bound. Exclusive/job renewal ceilings unchanged; replay returns replacement's current state, never resurrects it"},
                 "list": {"method": "GET", "path": "/api/v1/leases", "description": "List leases (filter by resource, service, status)"},
             },
+            "lease_groups": {
+                "create": {"method": "POST", "path": "/api/v1/lease-groups", "auth": "all member resources visible", "description": "Stable request_key and ordered members: resource_id, explicit ttl_seconds, optional memory_mb/service_id/max_total_s. Exclusive normal-priority ordinary host queues, HOLD required, no group deadline. Only one acquiring/occupying group at a time; pending groups FIFO without leases."},
+                "get": {"method": "GET", "path": "/api/v1/lease-groups/{id}", "auth": "owner/admin or all members visible", "description": "Read partial ownership, generation and exact cleanup/settlement receipts. Never acquire on read."},
+                "events": {"method": "GET", "path": "/api/v1/lease-groups/{id}/events", "auth": "same as group read", "description": "Durable event history: after sequence, limit 1-500 (default 100). Reconcile after SSE reconnect."},
+                "advance": {"method": "POST", "path": "/api/v1/lease-groups/{id}/advance", "auth": "owner/admin and all members visible", "description": "Body {generation}: continue acquisition after first member admitted; no queue priority override."},
+                "serving": {"method": "POST", "path": "/api/v1/lease-groups/{id}/serving", "auth": "owner/admin and all members visible", "description": "Body {generation,evidence_ref,evidence_sha256}: provider attestation, accepted only with every member active; does not start workers."},
+                "release": {"method": "POST", "path": "/api/v1/lease-groups/{id}/release", "auth": "owner/admin", "description": "Body {generation}: cancel queued members, retain active members for cleanup. Expiry alone cannot settle HOLD."},
+                "release_member": {"method": "POST", "path": "/api/v1/lease-groups/{id}/members/{lease_id}/release", "auth": "owner/admin", "description": "Body {generation,evidence_ref,evidence_sha256}: attributed cleanup plus exact member release/settlement receipt, one transaction."},
+                "fence": {"method": "POST", "path": "/api/v1/lease-groups/{id}/fence", "auth": "owner/admin", "description": "Body {generation,reason}: advance coordinator generation and begin draining. Never infer process death or retry work."},
+            },
             "events": {
                 "stream": {"method": "GET", "path": "/api/v1/events", "auth": "any", "description": "SSE stream — real-time notifications"},
                 "recent": {"method": "GET", "path": "/api/v1/events/recent", "auth": "any", "description": "Recent events (polling fallback)"},
@@ -12099,6 +12142,124 @@ def delete_resource(resource_id: str, auth: AuthContext = Depends(get_auth)):
 
 # --- Leases ---
 
+def _can_see_lease_group(auth, group):
+    if auth.is_admin() or group['owner_id'] == auth.owner_id:
+        return True
+    visible = _visible_device_ids(auth)
+    members = db.query('SELECT resource_id FROM lease_group_members WHERE group_id=?',
+                       (group['id'],))
+    for member in members:
+        resource = db.query_one('SELECT device_id FROM resources WHERE id=?',
+                                (member['resource_id'],))
+        if resource is None or (visible is not None and resource['device_id'] not in visible):
+            return False
+    return bool(members)
+
+
+def _require_lease_group(auth, group_id, *, mutate=False, acquire=False):
+    group = db.query_one('SELECT * FROM lease_groups WHERE id=?', (group_id,))
+    if group is None or not _can_see_lease_group(auth, group):
+        raise HTTPException(404, 'Lease group not found')
+    if mutate and not auth.is_admin() and group['owner_id'] != auth.owner_id:
+        raise HTTPException(403, 'A lease group is changed by its owner')
+    if acquire:
+        for member in db.query('SELECT resource_id FROM lease_group_members WHERE group_id=?',
+                                (group_id,)):
+            _require_visible_resource(auth, member['resource_id'])
+    return group
+
+
+def _publish_lease_group(result):
+    """Only called after the entire group/member transaction has committed."""
+    body, effects = result
+    for moves in effects.moves:
+        _publish_lease_moves(moves)
+    for resource_id, req, lease, metadata in effects.reservations:
+        _publish_lease_reservation(resource_id, req, lease, metadata, effects.actor)
+    for lease, status in effects.releases:
+        kind = {'cancelled': 'lease.cancelled', 'settled': 'lease.settled'}.get(
+            status, 'lease.released')
+        payload = {'lease_id': lease['id'], 'resource_id': lease['resource_id']}
+        db.audit(effects.actor, kind, lease['id'], payload)
+        event_bus.emit(kind, lease['id'], payload)
+    for event in effects.events:
+        payload = {**event['data'], 'sequence': event['sequence']}
+        db.audit(effects.actor, event['kind'], event['group_id'], payload)
+        event_bus.emit(event['kind'], event['group_id'], payload, scope=event['owner_id'])
+    return body
+
+
+@app.post('/api/v1/lease-groups')
+def create_lease_group(req: LeaseGroupRequest, auth: AuthContext = Depends(get_auth)):
+    for member in req.members:
+        _require_visible_resource(auth, member.resource_id)
+    return _publish_lease_group(lease_groups.create(
+        db, req.model_dump(), auth.owner_id, default_ttl=EXCLUSIVE_DEFAULT_TTL_S,
+        total_floor=LEASE_MAX_TOTAL_S, total_hard=LEASE_MAX_TOTAL_HARD_S))
+
+
+@app.get('/api/v1/lease-groups/{group_id}')
+def get_lease_group(group_id: str, auth: AuthContext = Depends(get_auth)):
+    _require_lease_group(auth, group_id)
+    return _publish_lease_group(lease_groups.get(
+        db, group_id, auth.owner_id, default_ttl=EXCLUSIVE_DEFAULT_TTL_S))
+
+
+@app.get('/api/v1/lease-groups/{group_id}/events')
+def lease_group_events(group_id: str, after: int = 0, limit: int = 100,
+                       auth: AuthContext = Depends(get_auth)):
+    _require_lease_group(auth, group_id)
+    _check_limit(limit)
+    if after < 0:
+        raise HTTPException(400, 'after must be non-negative')
+    return [{**dict(row), 'data': json.loads(row['data'])} for row in db.query(
+        'SELECT * FROM lease_group_events WHERE group_id=? AND sequence>? '
+        'ORDER BY sequence LIMIT ?', (group_id, after, limit))]
+
+
+@app.post('/api/v1/lease-groups/{group_id}/advance')
+def advance_lease_group(group_id: str, req: LeaseGroupCommand,
+                        auth: AuthContext = Depends(get_auth)):
+    _require_lease_group(auth, group_id, mutate=True, acquire=True)
+    return _publish_lease_group(lease_groups.advance(
+        db, group_id, req.generation, auth.owner_id, default_ttl=EXCLUSIVE_DEFAULT_TTL_S,
+        total_floor=LEASE_MAX_TOTAL_S, total_hard=LEASE_MAX_TOTAL_HARD_S))
+
+
+@app.post('/api/v1/lease-groups/{group_id}/serving')
+def serve_lease_group(group_id: str, req: LeaseGroupAttestation,
+                      auth: AuthContext = Depends(get_auth)):
+    _require_lease_group(auth, group_id, mutate=True, acquire=True)
+    return _publish_lease_group(lease_groups.mark_serving(
+        db, group_id, req.generation, req.model_dump(exclude={'generation'}), auth.owner_id,
+        default_ttl=EXCLUSIVE_DEFAULT_TTL_S))
+
+
+@app.post('/api/v1/lease-groups/{group_id}/release')
+def release_lease_group(group_id: str, req: LeaseGroupCommand,
+                        auth: AuthContext = Depends(get_auth)):
+    _require_lease_group(auth, group_id, mutate=True)
+    return _publish_lease_group(lease_groups.begin_release(
+        db, group_id, req.generation, auth.owner_id, default_ttl=EXCLUSIVE_DEFAULT_TTL_S))
+
+
+@app.post('/api/v1/lease-groups/{group_id}/members/{lease_id}/release')
+def release_lease_group_member(group_id: str, lease_id: str, req: LeaseGroupAttestation,
+                               auth: AuthContext = Depends(get_auth)):
+    _require_lease_group(auth, group_id, mutate=True)
+    return _publish_lease_group(lease_groups.release_member(
+        db, group_id, lease_id, req.generation, req.model_dump(exclude={'generation'}),
+        auth.owner_id, default_ttl=EXCLUSIVE_DEFAULT_TTL_S))
+
+
+@app.post('/api/v1/lease-groups/{group_id}/fence')
+def fence_lease_group(group_id: str, req: LeaseGroupFence,
+                      auth: AuthContext = Depends(get_auth)):
+    _require_lease_group(auth, group_id, mutate=True)
+    return _publish_lease_group(lease_groups.fence(
+        db, group_id, req.generation, req.reason, auth.owner_id,
+        default_ttl=EXCLUSIVE_DEFAULT_TTL_S))
+
 @app.post("/api/v1/resources/{resource_id:path}/leases")
 def request_lease(resource_id: str, req: LeaseRequest, auth: AuthContext = Depends(get_auth)):
     """Reserve declared capacity atomically; queueing does not start execution."""
@@ -12107,13 +12268,18 @@ def request_lease(resource_id: str, req: LeaseRequest, auth: AuthContext = Depen
         db, resource_id, req, auth.owner_id,
         default_ttl=EXCLUSIVE_DEFAULT_TTL_S,
         total_floor=LEASE_MAX_TOTAL_S, total_hard=LEASE_MAX_TOTAL_HARD_S)
+    return _publish_lease_reservation(resource_id, req, body, metadata, auth.owner_id)
+
+
+def _publish_lease_reservation(resource_id, req, body, metadata, actor):
+    """Publish ordinary admission effects after the allocating transaction commits."""
     lease_id = body['lease_id']
     # The allocation is committed before any audit/event consumer observes it.
     # Waiters this call's reap granted on the way in are published first: they
     # were ahead of us.
     _publish_lease_moves(metadata)
     if body['status'] == 'queued':
-        db.audit(auth.owner_id, "lease.queued", lease_id,
+        db.audit(actor, "lease.queued", lease_id,
                  {"resource_id": resource_id, "memory_mb": req.memory_mb,
                   "queue_position": body['queue_position'], "wait_until": body['wait_until']})
         event_bus.emit('lease.queued', lease_id,
@@ -12125,16 +12291,16 @@ def request_lease(resource_id: str, req: LeaseRequest, auth: AuthContext = Depen
     max_total_clamped = metadata['max_total_clamped']
     ttl_defaulted = metadata['ttl_defaulted']
 
-    db.audit(auth.owner_id, "lease.granted", lease_id,
+    db.audit(actor, "lease.granted", lease_id,
              {"resource_id": resource_id, "memory_mb": req.memory_mb})
     if max_total_clamped:
-        db.audit(auth.owner_id, "lease.max_total_clamped", lease_id,
+        db.audit(actor, "lease.max_total_clamped", lease_id,
                  {"resource_id": resource_id, "service_id": req.service_id,
                   "asked_for_s": max_total_clamped,
                   "granted_s": LEASE_MAX_TOTAL_HARD_S,
                   "why": "max_total_s above the registry hard limit"})
     if ttl_defaulted:
-        db.audit(auth.owner_id, "lease.ttl_defaulted", lease_id,
+        db.audit(actor, "lease.ttl_defaulted", lease_id,
                  {"resource_id": resource_id, "service_id": req.service_id,
                   "ttl_seconds": EXCLUSIVE_DEFAULT_TTL_S,
                   "why": "exclusive lease requested with no duration"})
