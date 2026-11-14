@@ -2,6 +2,13 @@
 
 What each release changed.
 
+## 2026-11-14 — Hosts can observe their own group-member authority (#18)
+
+- A host-local service can read its exact member's current group generation and lease authority without visibility of the other hosts or a copied coordinator credential. The projection hides other members, intent and evidence and is not cacheable.
+- The existing lease event stream wakes each affected host after a committed group change, without exposing private group history or creating a second polling service. Notices are reconciliation hints; stable reads emit none.
+- Partial admission, a fence/release, any member's expiry, mismatched authority or recorded cleanup cannot authorize work. Reads use normal expiry reconciliation but never acquire, renew or release a group member; full-group reads and owner/admin writes keep their existing boundaries.
+- HTTP/SQLite controls cover scope isolation, generation loss with HOLD retained, partial acquisition, missing/mismatched links, revoked access and unchanged cleanup permissions. This adds no host supervisor or provider deployment by itself.
+
 ## 2026-11-14 — Durable groups across ordinary host lease queues (#16)
 
 - A stable `request_key` now binds one multi-host operation to its member leases and durable event history. Group intent and member admission commit together; response retries cannot create a second allocation.

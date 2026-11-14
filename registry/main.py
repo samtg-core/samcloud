@@ -9371,6 +9371,7 @@ def api_index():
                 "create": {"method": "POST", "path": "/api/v1/lease-groups", "auth": "all member resources visible", "description": "Stable request_key and ordered members: resource_id, explicit ttl_seconds, optional memory_mb/service_id/max_total_s. Exclusive normal-priority ordinary host queues, HOLD required, no group deadline. Only one acquiring/occupying group at a time; pending groups FIFO without leases."},
                 "get": {"method": "GET", "path": "/api/v1/lease-groups/{id}", "auth": "owner/admin or all members visible", "description": "Read partial ownership, generation and exact cleanup/settlement receipts. Never acquire on read."},
                 "events": {"method": "GET", "path": "/api/v1/lease-groups/{id}/events", "auth": "same as group read", "description": "Durable event history: after sequence, limit 1-500 (default 100). Reconcile after SSE reconnect."},
+                "member_authority": {"method": "GET", "path": "/api/v1/lease-groups/{id}/members/{lease_id}/authority", "auth": "exact member resource visible", "description": "Host-local, non-cacheable generation and exact lease projection. All-members admission plus own lease authority at observed_at; hides other hosts, intent and evidence. Never acquires, renews or releases. Providers pin generation and re-read before using it; existing lease.group_changed events wake only affected hosts."},
                 "advance": {"method": "POST", "path": "/api/v1/lease-groups/{id}/advance", "auth": "owner/admin and all members visible", "description": "Body {generation}: continue acquisition after first member admitted; no queue priority override."},
                 "serving": {"method": "POST", "path": "/api/v1/lease-groups/{id}/serving", "auth": "owner/admin and all members visible", "description": "Body {generation,evidence_ref,evidence_sha256}: provider attestation, accepted only with every member active; does not start workers."},
                 "release": {"method": "POST", "path": "/api/v1/lease-groups/{id}/release", "auth": "owner/admin", "description": "Body {generation}: cancel queued members, retain active members for cleanup. Expiry alone cannot settle HOLD."},
@@ -12186,6 +12187,26 @@ def _publish_lease_group(result):
         payload = {**event['data'], 'sequence': event['sequence']}
         db.audit(effects.actor, event['kind'], event['group_id'], payload)
         event_bus.emit(event['kind'], event['group_id'], payload, scope=event['owner_id'])
+    # Hosts see a minimal wakeup through the existing resource-scoped lease
+    # stream, not the private group history. Once per changed group/transaction;
+    # authority is always re-read, never inferred from an event's phase.
+    changed = {event['group_id']: event for event in effects.events}
+    for group_id, event in changed.items():
+        members = db.query(
+            'SELECT m.lease_id,m.resource_id,r.device_id FROM lease_group_members m '
+            'JOIN lease_groups g ON g.id=m.group_id '
+            'JOIN resources r ON r.id=m.resource_id '
+            'LEFT JOIN leases l ON l.id=m.lease_id '
+            'WHERE m.group_id=? AND m.lease_id IS NOT NULL AND '
+            '(l.id IS NULL OR (l.resource_id=m.resource_id AND l.agent_id=g.owner_id))',
+            (group_id,))
+        for member in members:
+            event_bus.emit('lease.group_changed', member['lease_id'], {
+                'group_id': group_id, 'generation': event['data']['generation'],
+                'phase': event['data']['phase'],
+                'group_event_sequence': event['sequence'],
+                'resource_id': member['resource_id'], 'lease_id': member['lease_id']},
+                scope=f"device:{member['device_id']}")
     return body
 
 
@@ -12215,6 +12236,26 @@ def lease_group_events(group_id: str, after: int = 0, limit: int = 100,
     return [{**dict(row), 'data': json.loads(row['data'])} for row in db.query(
         'SELECT * FROM lease_group_events WHERE group_id=? AND sequence>? '
         'ORDER BY sequence LIMIT ?', (group_id, after, limit))]
+
+
+@app.get('/api/v1/lease-groups/{group_id}/members/{lease_id}/authority')
+def lease_group_member_authority(group_id: str, lease_id: str, response: Response,
+                                 auth: AuthContext = Depends(get_auth)):
+    """A host reads its exact member without access to the other hosts."""
+    response.headers['Cache-Control'] = 'no-store'
+    member = db.query_one(
+        'SELECT resource_id FROM lease_group_members WHERE group_id=? AND lease_id=?',
+        (group_id, lease_id))
+    if member is None:
+        raise HTTPException(404, 'Lease-group member not found')
+    try:
+        _require_visible_resource(auth, member['resource_id'])
+    except HTTPException as error:
+        if error.status_code == 404:
+            raise HTTPException(404, 'Lease-group member not found') from None
+        raise
+    return _publish_lease_group(lease_groups.member_authority(
+        db, group_id, lease_id, auth.owner_id, default_ttl=EXCLUSIVE_DEFAULT_TTL_S))
 
 
 @app.post('/api/v1/lease-groups/{group_id}/advance')
