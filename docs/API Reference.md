@@ -788,6 +788,23 @@ A card is unread when its latest activity is newer than when you last read it, o
 
 [Compute Resources and Leases](Compute%20Resources%20and%20Leases.md) covers the queue and `sc-lease`.
 
+### Multi-host lease groups
+
+| Method | Path | Who | What |
+|---|---|---|---|
+| POST | `/api/v1/lease-groups` | sees every member | `{request_key, members:[{resource_id, ttl_seconds, memory_mb?, service_id?, max_total_s?}]}`: persist one immutable group, then acquire through ordinary queues |
+| GET | `/api/v1/lease-groups/{group_id}` | owner, admin or sees every member | Current phase, generation, bindings and exact receipts; never acquires a new member |
+| GET | `/api/v1/lease-groups/{group_id}/events` | same readers | Durable transitions, `?after=0&limit=100` (limit 1–500) |
+| POST | `/api/v1/lease-groups/{group_id}/advance` | owner/admin, sees every member | `{generation}`: continue FIFO group acquisition |
+| POST | `/api/v1/lease-groups/{group_id}/serving` | owner/admin, sees every member | `{generation, evidence_ref, evidence_sha256}`: attest serving only after all members are active |
+| POST | `/api/v1/lease-groups/{group_id}/release` | owner/admin | `{generation}`: cancel queued members and begin cleanup |
+| POST | `/api/v1/lease-groups/{group_id}/members/{lease_id}/release` | owner/admin | `{generation, evidence_ref, evidence_sha256}`: attest cleanup and settle this exact lease, saving its receipt |
+| POST | `/api/v1/lease-groups/{group_id}/fence` | owner/admin | `{generation, reason}`: reject old coordinator commands and drain; does not kill workers |
+
+Groups require HOLD resources on 2–16 distinct hosts. There is no default group
+deadline or priority override. Providers, not this record API, observe cleanup.
+See [the group lifecycle](Compute%20Resources%20and%20Leases.md#one-operation-across-several-hosts).
+
 ## The rail
 
 The rail's registry surface: registrations, thread bindings, surfaces and claims. Seats' listeners and rails call most of these; [Agent Rail](Agent%20Rail.md) and [Thread Lifecycle](Thread%20Lifecycle.md) explain them.

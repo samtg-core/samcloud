@@ -2,6 +2,13 @@
 
 What each release changed.
 
+## 2026-11-14 — Durable groups across ordinary host lease queues (#16)
+
+- A stable `request_key` now binds one multi-host operation to its member leases and durable event history. Group intent and member admission commit together; response retries cannot create a second allocation.
+- Groups serialize acquisition FIFO, first waiting for their declared first host, then requesting the others through normal host queues. Partial ownership is visible; serving requires every member active. There is no group deadline or priority boost.
+- HOLD expiry remains uncertain until cleanup is attested and the exact lease's settlement receipt is saved. Generation fencing drains rather than retries. Scoped reads require every host; owner cleanup remains possible after access revocation.
+- This is the registry record/API, not a provider rollout or process-death detector. Existing member renewal ceilings still apply. HTTP/SQLite tests cover concurrent coordinators, normal queue order, lost responses, rollback, HOLD settlement, stale generations, access and schema upgrades.
+
 ## 2026-11-14 — google-broker holds more than one Google Cloud project (#1246)
 
 - An OAuth client has a name. `default` is the existing `client_secret.json`, and others live in `clients/<name>.json`. `GET /oauth/start?client=<name>` asks for consent through that client, and the account it enrols records it and refreshes through it on every mint. Accounts enrolled before this have no client recorded and keep using `default`. A mint whose client is missing answers `503` and names it.

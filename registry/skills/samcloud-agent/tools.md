@@ -1,4 +1,4 @@
-<!-- SKILL_VERSION: 3.18.4 -->
+<!-- SKILL_VERSION: 3.18.5 -->
 # tools — the API, the write tool, the helpers, the machines
 
 ## The API
@@ -214,6 +214,27 @@ sc-lease hold <id> --ttl S &  ·  sc-lease release <id>     block until granted,
                                                   admin settles it (DELETE, answer status: settled);
                                                   GET /resources/{id} lists them under unsettled
 ```
+
+For one operation across hosts, `POST /lease-groups` takes a stable `request_key`
+and 2–16 ordered `members` (`resource_id`, explicit `ttl_seconds`, optional
+`memory_mb`, `service_id`, `max_total_s`). Every host must use HOLD. Members queue
+normally at normal priority; only one group acquires at a time, first waiting
+for the first declared host. Reuse the key after a lost response. `GET
+/lease-groups/{id}` reports partial ownership; it never acquires a new member.
+`POST /{id}/advance` continues it after a lease event. Every command names the
+current `generation`. Serving (`POST /{id}/serving`) requires all members active
+and an `evidence_ref` plus `evidence_sha256` attestation from the provider.
+
+`POST /{id}/release` cancels waits and begins cleanup. After observing each
+worker's exit, `POST /{id}/members/{lease_id}/release` with generation and the
+same evidence fields settles that exact lease and saves its receipt. HOLD expiry
+does not prove cleanup. Missing evidence or a missing lease leaves the group
+uncertain; do not retry with a new group key. `POST /{id}/fence` (`generation`,
+`reason`) invalidates old coordinator commands and drains; it does not stop a
+process. Durable history: `GET /{id}/events?after=N&limit=100` (maximum 500).
+Only the owner/admin changes a group; other readers must see every member.
+There is no group deadline. Member renewal still obeys the existing lease ceiling;
+this API supplies neither exclusive rollover nor a host process supervisor.
 
 A hop checks the machine's SSH host key against the key pinned for that device. A
 verified hop says nothing about it. A refused one exits 255 and starts:
