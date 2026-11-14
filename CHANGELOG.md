@@ -2,6 +2,12 @@
 
 What each release changed.
 
+## 2026-11-14 — google-broker holds more than one Google Cloud project (#1246)
+
+- An OAuth client has a name. `default` is the existing `client_secret.json`, and others live in `clients/<name>.json`. `GET /oauth/start?client=<name>` asks for consent through that client, and the account it enrols records it and refreshes through it on every mint. Accounts enrolled before this have no client recorded and keep using `default`. A mint whose client is missing answers `503` and names it.
+- `POST /oauth/client?name=<name>` stores a named client. Its body can be `{"client_id", "secret_from"}`: the secret a person pasted into a one-time secret link moves into the client record and leaves the secret store, so it passes through nobody's hands. `GET /health` lists the clients and each account's client.
+- So keys for Sam's professional Google account come from his own project, apart from the family one. Credential Brokers describes it, and `google-broker/test_named_clients.py` tests it.
+
 ## 2026-11-14 — The thread pill's drop-down opens again (#1083)
 
 - The thread pill in the top bar opens its list again, so you can start a new thread or resume another one. The 13 November sticky header (#1082) gave the bar a blurred backdrop, and a backdrop filter makes the bar the containing block of the pill's drop-down, so the bar's `overflow-hidden` cut the list off. The bar is now opaque and still sticky.

@@ -21,6 +21,7 @@ Run: uvicorn main:app --host 0.0.0.0 --port 7783
 
 import json
 import os
+import re
 import secrets
 import time
 from pathlib import Path
@@ -38,7 +39,8 @@ SAMCLOUD_API = os.environ.get("SAMCLOUD_API", "").strip().rstrip("/")
 if not SAMCLOUD_API:
     raise SystemExit("google-broker: set SAMCLOUD_API to the plane's API base, e.g. https://cloud.example.org/api/v1")
 CONFIG_DIR = Path(os.environ.get("GOOGLE_BROKER_CONFIG", str(Path.home() / ".config/samcloud/google-broker")))
-CLIENT_FILE = CONFIG_DIR / "client_secret.json"     # GCP OAuth web client (id + secret)
+CLIENT_FILE = CONFIG_DIR / "client_secret.json"     # GCP OAuth web client (id + secret): client "default"
+CLIENTS_DIR = CONFIG_DIR / "clients"                # further named clients, <name>.json (#1246)
 ACCOUNTS_FILE = CONFIG_DIR / "accounts.json"        # [{key, refresh_token, allowed_scopes, google_scopes, email?}]
 CLAUDE_FILE = CONFIG_DIR / "claude_tokens.json"     # {key: {token, allowed_scopes, note?}}
 LEGACY_CLAUDE = CONFIG_DIR / "claude_oauth_token"   # raw token file (migrated to key 'default')
@@ -87,9 +89,30 @@ def _write_json(path: Path, data) -> None:
     os.chmod(path, 0o600)
 
 
-def load_client() -> Optional[dict]:
+CLIENT_NAME = re.compile(r"^[a-z0-9][a-z0-9-]{0,31}$")
+
+
+def client_path(name: str) -> Path:
+    """Where a named OAuth client lives. One broker can hold clients from several
+    Google Cloud projects (#1246: the family project and Sam's professional one);
+    each enrolled account remembers which client it consented through."""
+    if name == "default":
+        return CLIENT_FILE
+    if not CLIENT_NAME.match(name):
+        raise HTTPException(400, "client names are lowercase letters, digits and dashes")
+    return CLIENTS_DIR / f"{name}.json"
+
+
+def client_names() -> list[str]:
+    names = ["default"] if load_client() is not None else []
+    if CLIENTS_DIR.is_dir():
+        names += sorted(f.stem for f in CLIENTS_DIR.glob("*.json") if load_client(f.stem) is not None)
+    return names
+
+
+def load_client(name: str = "default") -> Optional[dict]:
     """Accepts either the raw GCP download ({'web': {...}} / {'installed': {...}}) or flat."""
-    raw = _read_json(CLIENT_FILE, None)
+    raw = _read_json(client_path(name), None)
     if raw is None:
         return None
     for k in ("web", "installed"):
@@ -163,7 +186,9 @@ async def health():
     return {
         "status": "healthy",
         "client_configured": load_client() is not None,
+        "clients": client_names(),
         "accounts": [{"key": a["key"], "email": a.get("email"),
+                      "client": a.get("client", "default"),
                       "allowed_scopes": a.get("allowed_scopes", ["*"]),
                       "google_scopes": a.get("google_scopes", [])} for a in accounts],
         "claude_token_keys": list(load_claude_tokens().keys()),
@@ -173,35 +198,57 @@ async def health():
 # ---------- OAuth client + consent flow (one-time setup, phone-friendly) ----
 
 @app.post("/oauth/client")
-async def upload_client(body: dict, authorization: Optional[str] = Header(None)):
-    """Store the GCP OAuth client JSON (web-application type). Admin only."""
+async def upload_client(body: dict, name: str = "default",
+                        authorization: Optional[str] = Header(None)):
+    """Store a GCP OAuth client (web-application type) as client `name`. Admin only.
+
+    The body is the client JSON, or `{"client_id": "...", "secret_from": "<key>"}`:
+    the client secret was pasted by a person into a one-time `/secrets/link`
+    under `<key>`, and moves from there into the client record, so it never
+    passes through the admin's hands or a file (#1246)."""
     identity = await verify_samcloud(authorization)
     if "*" not in (identity.get("scopes") or []):
         raise HTTPException(403, "admin token required")
-    _write_json(CLIENT_FILE, body)
-    if load_client() is None:
-        CLIENT_FILE.unlink()
+    path = client_path(name)
+    secret_key = body.get("secret_from")
+    if secret_key:
+        store = _read_json(SECRETS_FILE, {})
+        if secret_key not in store:
+            raise HTTPException(404, f"no secret under key '{secret_key}'")
+        body = {"client_id": body.get("client_id"), "client_secret": store[secret_key]["secret"]}
+    path.parent.mkdir(parents=True, exist_ok=True)
+    _write_json(path, body)
+    if load_client(name) is None:
+        path.unlink()
         raise HTTPException(400, "not a valid OAuth client JSON (need client_id + client_secret, type web)")
-    return {"status": "stored"}
+    if secret_key:
+        store.pop(secret_key, None)
+        _write_json(SECRETS_FILE, store)
+    log_mint({"event": "client_stored", "client": name, "by": identity.get("username"),
+              "from_secret": bool(secret_key)})
+    return {"status": "stored", "client": name}
 
 
 @app.get("/oauth/start")
 async def oauth_start(key: str = "assistant",
                       scopes: str = "calendar,gmail.modify,userinfo.email",
-                      allowed_scopes: str = "group:personal"):
+                      allowed_scopes: str = "group:personal",
+                      client: str = "default"):
     """
     Begin consent for a Google account → stored as account `key`.
     Open this URL in any browser logged into (or able to log into) the target
     Google account. `scopes` = Google scopes granted at consent (aliases ok);
     `allowed_scopes` = samcloud scopes allowed to mint from this account.
+    `client` = which OAuth client (Google Cloud project) asks for consent.
     """
-    client = load_client()
+    client_name = client
+    client = load_client(client_name)
     if client is None:
-        raise HTTPException(503, "no OAuth client configured — POST /oauth/client first")
+        raise HTTPException(503, f"no OAuth client '{client_name}' configured — POST /oauth/client first")
     google_scopes = resolve_scopes([s.strip() for s in scopes.split(",") if s.strip()])
     state = secrets.token_urlsafe(24)
     _write_json(STATE_FILE, {
-        "state": state, "key": key,
+        "state": state, "key": key, "client": client_name,
         "allowed_scopes": [s.strip() for s in allowed_scopes.split(",") if s.strip()],
         "google_scopes": google_scopes, "ts": int(time.time()),
     })
@@ -226,7 +273,8 @@ async def oauth_callback(code: str = "", state: str = "", error: str = ""):
         raise HTTPException(400, "no consent flow in progress / state mismatch")
     if int(time.time()) - saved.get("ts", 0) > 900:
         raise HTTPException(400, "consent flow expired — restart /oauth/start")
-    client = load_client()
+    client_name = saved.get("client", "default")
+    client = load_client(client_name)
     async with httpx.AsyncClient(timeout=15) as c:
         r = await c.post(GOOGLE_TOKEN, data={
             "client_id": client["client_id"], "client_secret": client["client_secret"],
@@ -252,10 +300,11 @@ async def oauth_callback(code: str = "", state: str = "", error: str = ""):
         "refresh_token": tok["refresh_token"],
         "allowed_scopes": saved["allowed_scopes"],
         "google_scopes": saved["google_scopes"],
+        **({} if client_name == "default" else {"client": client_name}),
     })
     _write_json(ACCOUNTS_FILE, accounts)
     STATE_FILE.unlink()
-    log_mint({"event": "account_enrolled", "key": saved["key"], "email": email,
+    log_mint({"event": "account_enrolled", "key": saved["key"], "email": email, "client": client_name,
               "google_scopes": saved["google_scopes"]})
     return HTMLResponse(f"""<!doctype html><html><body>
 <h1>Account enrolled: {saved['key']}</h1>
@@ -287,7 +336,9 @@ async def mint(req: MintRequest, authorization: Optional[str] = Header(None)):
     if over:
         raise HTTPException(403, f"scopes not granted at consent: {sorted(over)}")
 
-    client = load_client()
+    client = load_client(acct.get("client", "default"))
+    if client is None:
+        raise HTTPException(503, f"account '{req.account}' needs OAuth client '{acct.get('client', 'default')}', which is not configured")
     data = {"client_id": client["client_id"], "client_secret": client["client_secret"],
             "refresh_token": acct["refresh_token"], "grant_type": "refresh_token"}
     if set(requested) != granted:
