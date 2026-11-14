@@ -46,7 +46,8 @@ def test_host_reads_only_its_member_without_full_group_visibility(client, hosts,
                    group['members'][2]['lease_id'], 'private-request-key', PROOF['evidence_ref']]:
         assert hidden not in encoded
     assert set(view) == {'group_id', 'owner_id', 'generation', 'phase',
-                         'release_requested', 'observed_at', 'authoritative', 'member'}
+                         'release_requested', 'observed_at', 'authoritative',
+                         'authority_expires_at', 'member'}
     assert local_reader.get(f"{ROOT}/{group['id']}").status_code == 404
     assert local_reader.get(f"{ROOT}/{group['id']}/events").status_code == 404
     assert command(local_reader, group, 'release').status_code == 404
@@ -138,6 +139,53 @@ def test_member_cleanup_and_terminal_receipt_do_not_expose_evidence(client, host
     assert view['member']['cleanup_attested'] and view['member']['settlement_recorded']
     assert view['member']['lease']['status'] == 'released'
     assert PROOF['evidence_ref'] not in json.dumps(view)
+
+
+def test_other_member_expiring_after_refresh_revokes_same_snapshot(client, hosts, local_reader, monkeypatch):
+    group = create(client, hosts)
+    dead = group['members'][2]['lease_id']
+    refresh = main.lease_groups._refresh
+
+    def expires_after_reap(conn, effects, default_ttl):
+        refresh(conn, effects, default_ttl)
+        # Cross the expiry boundary after reap, before observed_at. Its journal
+        # state deliberately stays active until the next reap.
+        conn.execute("UPDATE leases SET expires_at='2000-01-01T00:00:00+00:00' WHERE id=?", (dead,))
+
+    monkeypatch.setattr(main.lease_groups, '_refresh', expires_after_reap)
+    view = observed(local_reader, group)
+    assert view['phase'] == 'admitted' and view['authoritative'] is False
+    assert view['authority_expires_at'] is None
+    assert view['member']['lease']['status'] == 'active'
+    held = db.query_one('SELECT * FROM leases WHERE id=?', (dead,))
+    assert held['status'] == 'active' and held['settled_at'] is None
+    assert db.query_one('SELECT COUNT(*) n FROM leases')['n'] == 3
+    assert db.query_one('SELECT COUNT(*) n FROM lease_group_members WHERE release_receipt IS NOT NULL')['n'] == 0
+
+
+def test_authority_ends_at_earliest_member_not_only_local_expiry(client, hosts, local_reader):
+    group = create(client, hosts)
+    other = group['members'][2]['lease_id']
+    expiry = '2090-01-01T00:00:00+00:00'
+    db.execute("UPDATE leases SET expires_at='2091-01-01T00:00:00+00:00'")
+    db.execute('UPDATE leases SET expires_at=? WHERE id=?', (expiry, other))
+    view = observed(local_reader, group)
+    assert view['authoritative'] is True
+    assert view['authority_expires_at'] == expiry
+    assert view['member']['lease']['expires_at'] > expiry
+    assert other not in json.dumps(view)
+
+
+@pytest.mark.parametrize('field,value', [('exclusive', 0), ('priority', 'high'),
+                                       ('memory_mb', 999), ('ttl_s', 601),
+                                       ('agent_id', 'foreign-owner')])
+def test_other_active_member_must_match_its_intent(client, hosts, local_reader, field, value):
+    group = create(client, hosts)
+    db.execute(f'UPDATE leases SET {field}=? WHERE id=?', (value, group['members'][2]['lease_id']))
+    view = observed(local_reader, group)
+    assert view['authoritative'] is False
+    assert hosts[2] not in json.dumps(view)
+    assert view['member']['lease']['status'] == 'active'
 
 
 @pytest.mark.parametrize('field,value', [('exclusive', 0), ('priority', 'high'),

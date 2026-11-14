@@ -241,7 +241,10 @@ member resource. Its non-cacheable projection contains current generation,
 group phase/release flag, observation time, own lease and cleanup booleans; no
 other hosts, intent or evidence. Invisible/nonmember ids are404. `authoritative`
 is true only at that observed instant with the whole group admitted/serving and
-this member's matching active, unexpired exclusive HOLD lease. A fence, release,
+every member's matching active, unexpired exclusive HOLD lease. All are checked
+at the same observation instant. `authority_expires_at` is their earliest expiry,
+or null when not authoritative. Bound local authority by that interval minus
+the entire read duration, never by the own lease alone. A fence, release,
 partial admission or any member's expiry removes authority without freeing a
 claim. Pin and compare generation/lease/envelope; never treat a saved snapshot
 as perpetual permission. Reads do not acquire, renew, release or grant writes.

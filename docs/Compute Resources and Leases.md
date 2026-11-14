@@ -184,11 +184,17 @@ owner needs resource visibility for this projection; its separate full-group
 cleanup fallback is unchanged.
 
 `authoritative` describes the observed instant: the group is admitted/serving
-and not releasing, the member matches its own resource/owner and declared
-memory/TTL/service, its exclusive normal-priority lease is active and unexpired,
-its resource uses HOLD, and cleanup has not been recorded. A pending or partly
+and not releasing, every member matches its resource/owner and declared
+memory/TTL/service, every exclusive normal-priority lease is active and unexpired
+at that same instant, every resource uses HOLD, and cleanup has not been recorded. A pending or partly
 admitted group, a fence, release or expiry on **any** member makes it false.
 A mismatched lease link is hidden, rather than returning another resource's row.
+`authority_expires_at` is the earliest expiry among all required members when
+authoritative, otherwise null. It reveals no other member identity. A host must
+bound its local authority by that time, not just its own lease expiry. Subtract
+the entire observation request duration when mapping the server interval
+(`authority_expires_at - observed_at`) to a local monotonic clock; response or
+clock delays must not extend authority. Renewals require a fresh observation.
 The response is `Cache-Control: no-store`. This GET performs the same normal
 expiry reconciliation as group GET; it never requests another group member,
 renews a lease, releases capacity or adopts a generation for the caller.
