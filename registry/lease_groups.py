@@ -275,6 +275,85 @@ def get(db, group_id, actor, *, default_ttl):
         return _view(conn, group_id), effects
 
 
+def _member_live_at(conn, group, member, requested, now):
+    lease = _lease(conn, member)
+    if not lease:
+        return False
+    resource = conn.execute('SELECT * FROM resources WHERE id=?',
+                            (member['resource_id'],)).fetchone()
+    try:
+        live_time = (datetime.fromisoformat(lease['granted_at']) <= now
+                     < datetime.fromisoformat(lease['expires_at']))
+    except (TypeError, ValueError):
+        live_time = False
+    return bool(lease['resource_id'] == member['resource_id']
+                and lease['agent_id'] == group['owner_id']
+                and member['resource_id'] == requested['resource_id']
+                and lease['exclusive'] and lease['priority'] == 'normal'
+                and lease['memory_mb'] == requested['memory_mb']
+                and lease['ttl_s'] == requested['ttl_seconds']
+                and lease['service_id'] == requested['service_id']
+                and lease['status'] == 'active' and live_time
+                and lease['released_at'] is None and lease['settled_at'] is None
+                and not member['cleanup_evidence'] and not member['release_receipt']
+                and resource and holds_on_expiry(resource))
+
+
+def member_authority(db, group_id, lease_id, actor, *, default_ttl):
+    """Project one host's authority without revealing or acquiring other members.
+
+    The HTTP layer authorizes this exact member resource first. Like group GET,
+    normal expiry reconciliation runs, but no missing member is requested.
+    """
+    effects = Effects(actor)
+    with db.transaction() as conn:
+        conn.execute('BEGIN IMMEDIATE')
+        _group(conn, group_id)
+        member = conn.execute(
+            'SELECT * FROM lease_group_members WHERE group_id=? AND lease_id=?',
+            (group_id, lease_id)).fetchone()
+        if member is None:
+            raise HTTPException(404, 'Lease-group member not found')
+        member = dict(member)
+        _refresh(conn, effects, default_ttl)
+        group = _group(conn, group_id)
+        lease = _lease(conn, member)
+        identity_matches = bool(lease and lease['resource_id'] == member['resource_id']
+                                and lease['agent_id'] == group['owner_id'])
+        # A corrupt/mismatched link cannot expose a different resource's lease.
+        lease_view = None
+        if identity_matches:
+            fields = ('id', 'resource_id', 'agent_id', 'service_id', 'memory_mb',
+                      'priority', 'status', 'granted_at', 'expires_at',
+                      'released_at', 'settled_at', 'ttl_s', 'max_total_s')
+            lease_view = {name: lease[name] for name in fields}
+            lease_view['exclusive'] = bool(lease['exclusive'])
+        now = datetime.now(timezone.utc)
+        requested = json.loads(group['intent_json'])['members']
+        members = _members(conn, group_id)
+        # Reaping and this read use different instants. Validate every member at
+        # the advertised snapshot time, even if another lease expired since reap.
+        all_live = (len(members) == len(requested) and bool(members)
+                    and all(_member_live_at(conn, group, current, intent, now)
+                            for current, intent in zip(members, requested)))
+        authoritative = bool(group['phase'] in ('admitted', 'serving')
+                             and not group['release_requested'] and all_live)
+        # The local lease may outlive another required member. A host must not
+        # cache this observation past the earliest member expiry.
+        authority_expires_at = (min(datetime.fromisoformat(_lease(conn, current)['expires_at'])
+                                    for current in members).isoformat()
+                                if authoritative else None)
+        return {'group_id': group_id, 'owner_id': group['owner_id'],
+                'generation': group['generation'], 'phase': group['phase'],
+                'release_requested': bool(group['release_requested']),
+                'observed_at': now.isoformat(), 'authoritative': authoritative,
+                'authority_expires_at': authority_expires_at,
+                'member': {'resource_id': member['resource_id'], 'lease_id': lease_id,
+                           'cleanup_attested': bool(member['cleanup_evidence']),
+                           'settlement_recorded': bool(member['release_receipt']),
+                           'lease': lease_view}}, effects
+
+
 def advance(db, group_id, generation, actor, *, default_ttl, total_floor, total_hard):
     effects = Effects(actor)
     with db.transaction() as conn:
