@@ -217,8 +217,10 @@ sc-lease hold <id> --ttl S &  ·  sc-lease release <id>     block until granted,
 
 For one operation across hosts, `POST /lease-groups` takes a stable `request_key`
 and 2–16 ordered `members` (`resource_id`, explicit `ttl_seconds`, optional
-`memory_mb`, `service_id`, `max_total_s`). Every host must use HOLD. Members queue
-normally at normal priority; only one group acquires at a time, first waiting
+`memory_mb`, `service_id`, `max_total_s`). Every host must use HOLD. Members are
+exclusive: `memory_mb` is the declared envelope checked against capacity, not a
+measured footprint; any numeric remainder is unavailable to another allocation.
+Members queue at normal priority; only one group acquires at a time, first waiting
 for the first declared host. Reuse the key after a lost response. `GET
 /lease-groups/{id}` reports partial ownership; it never acquires a new member.
 `POST /{id}/advance` continues it after a lease event. Every command names the

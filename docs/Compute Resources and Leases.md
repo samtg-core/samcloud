@@ -121,6 +121,9 @@ names `resource_id`, an explicit positive `ttl_seconds`, and optional `memory_mb
 `service_id` and `max_total_s`. Every resource must use `expiry_policy: hold`.
 All members are exclusive, normal-priority requests through the ordinary host
 queues, with `wait: true` and no wait deadline. No new queue priority is granted.
+`memory_mb` records the declared envelope, still checked against the resource's
+capacity; it is not measured resident memory. Exclusive ownership blocks all
+other allocations even if numeric capacity-minus-claim fields show a remainder.
 
 ```json
 {"request_key":"pipeline-run-1","members":[
