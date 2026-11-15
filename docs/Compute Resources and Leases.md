@@ -168,11 +168,57 @@ starts draining. It rejects commands from an older coordinator; it does not kill
 a worker or prove that its memory is free. A replacement coordinator can finish
 cleanup using the current generation without erasing prior receipts.
 
-The owner and admin may mutate the group. Other readers must see every member
-resource; seeing one host is insufficient. Fresh acquisition and serving also
+The owner and admin may mutate the group. Full-group and event-history readers
+must see every member resource; seeing one host is insufficient. Fresh acquisition and serving also
 require current access to all hosts. The owner retains read/cleanup access after
 losing host visibility. Durable history is available at `GET /{id}/events?after=N`
 (default limit 100, maximum 500); SSE is a notification to reconcile that record.
+
+A host supervisor with access only to its own resource reads
+`GET /api/v1/lease-groups/{id}/members/{lease_id}/authority`. It returns the group
+id, owner, current `generation`, `phase`, release flag and `observed_at`, plus
+that exact member's lease and cleanup/settlement booleans. It exposes no other
+member ids or resources, request key, intent, event history or evidence content.
+Invisible, non-member and missing ids all answer the same404. Even the group
+owner needs resource visibility for this projection; its separate full-group
+cleanup fallback is unchanged.
+
+`authoritative` describes the observed instant: the group is admitted/serving
+and not releasing, every member matches its resource/owner and declared
+memory/TTL/service, every exclusive normal-priority lease is active and unexpired
+at that same instant, every resource uses HOLD, and cleanup has not been recorded. A pending or partly
+admitted group, a fence, release or expiry on **any** member makes it false.
+A mismatched lease link is hidden, rather than returning another resource's row.
+`authority_expires_at` is the earliest expiry among all required members when
+authoritative, otherwise null. It reveals no other member identity. A host must
+bound its local authority by that time, not just its own lease expiry. Subtract
+the entire observation request duration when mapping the server interval
+(`authority_expires_at - observed_at`) to a local monotonic clock; response or
+clock delays must not extend authority. Renewals require a fresh observation.
+The response is `Cache-Control: no-store`. This GET performs the same normal
+expiry reconciliation as group GET; it never requests another group member,
+renews a lease, releases capacity or adopts a generation for the caller.
+
+The existing `/events` stream also emits `lease.group_changed`, once per bound
+member of a changed group after the transaction commits. It carries only that
+member's `resource_id`, `lease_id`, group id, generation, phase and the durable
+source `group_event_sequence`. Normal resource visibility filters it, so a
+host sees its own notice without gaining the private `lease_group.*` history.
+No request key, other member or evidence is included. An unchanged authority
+read emits no notice. A missing lease still wakes its affected host; it is not
+silently settled.
+
+This is a wakeup, not authority. SSE is best effort: reconcile the projection on
+connect/reconnect and before admission, and use the existing lease events and
+stream heartbeats to trigger fresh observations. A notice never starts a
+replacement, adopts a generation or establishes that a backend stopped.
+
+Providers still compare the response with their pinned group, generation,
+owner, resource, exact lease and execution envelope before starting or admitting
+work. A JSON snapshot is not perpetual authority or proof that a process exists.
+Unknown/lost authority must not launch a replacement or imply physical cleanup;
+claims remain until the provider observes cleanup and the owner records the
+exact receipt. Host visibility grants no coordinator write permission.
 
 There is no group, assembly or idle timeout. Member renewal uses the existing
 `POST /leases/{id}/renew` and its existing ceiling; a group does not remove that

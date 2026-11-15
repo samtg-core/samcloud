@@ -1,4 +1,4 @@
-<!-- SKILL_VERSION: 3.18.5 -->
+<!-- SKILL_VERSION: 3.18.6 -->
 # tools — the API, the write tool, the helpers, the machines
 
 ## The API
@@ -234,7 +234,27 @@ does not prove cleanup. Missing evidence or a missing lease leaves the group
 uncertain; do not retry with a new group key. `POST /{id}/fence` (`generation`,
 `reason`) invalidates old coordinator commands and drains; it does not stop a
 process. Durable history: `GET /{id}/events?after=N&limit=100` (maximum 500).
-Only the owner/admin changes a group; other readers must see every member.
+Only the owner/admin changes a group; full-group/history readers must see every
+member. A host-local supervisor can instead GET
+`/lease-groups/{id}/members/{lease_id}/authority` with visibility of that exact
+member resource. Its non-cacheable projection contains current generation,
+group phase/release flag, observation time, own lease and cleanup booleans; no
+other hosts, intent or evidence. Invisible/nonmember ids are404. `authoritative`
+is true only at that observed instant with the whole group admitted/serving and
+every member's matching active, unexpired exclusive HOLD lease. All are checked
+at the same observation instant. `authority_expires_at` is their earliest expiry,
+or null when not authoritative. Bound local authority by that interval minus
+the entire read duration, never by the own lease alone. A fence, release,
+partial admission or any member's expiry removes authority without freeing a
+claim. Pin and compare generation/lease/envelope; never treat a saved snapshot
+as perpetual permission. Reads do not acquire, renew, release or grant writes.
+The existing `/events` stream sends resource-scoped `lease.group_changed`
+wakeups after committed changes, once per bound member. Each carries only that
+member's ids plus group generation/phase and source event sequence. It grants
+no authority or access to private group history. Re-read the projection on
+connect/reconnect, before admission and on existing lease events/heartbeats;
+SSE is best effort. Stable reads emit no wakeups. Unknown observations never
+prove cleanup or allow a replacement.
 There is no group deadline. Member renewal still obeys the existing lease ceiling;
 this API supplies neither exclusive rollover nor a host process supervisor.
 
