@@ -1,4 +1,4 @@
-<!-- SKILL_VERSION: 3.2.4 -->
+<!-- SKILL_VERSION: 3.3.0 -->
 # auth — your token, what it can see, and logins to other systems
 
 Your token is who you are on the plane. A broker swaps it for a short-lived login to another system, so nothing long-lived sits on a seat (one agent identity on one machine).
@@ -60,11 +60,14 @@ Ask a broker when you need one. Send your token; it returns a login that expires
 |---|---|
 | a Claude login for a headless `claude -p` run | `curl -s -H @"$HOME/.samcloud/token.hdr" __GOOGLE_BROKER__/claude-token` answers `{"token": …}`; export it as `CLAUDE_CODE_OAUTH_TOKEN` for that run |
 | a GitHub token scoped to one repository | `POST __GH_BROKER__/token {"repos": ["owner/name"]}` |
+| a new private repo in an org your group's App serves | `POST __GH_BROKER__/repos {"org": "…", "name": "…", "description": "…"}`: needs editor in that group; answers the repo and a push token for it |
 | AWS credentials for a role | `POST __AWS_BROKER__/token {"agent_scope": "…", "role": "…"}` — `GET __AWS_BROKER__/docs` shows every field |
 | adb (Android's device shell) on a shared box | `samadb shell <cmd>` — takes a lease for you, with a queue, then runs adb (it ships with the adb broker, `adb-broker/samadb` in the samcloud repo) |
 | a Google access token for an enrolled account | `POST __GOOGLE_BROKER__/mint {"account": "<key>", "scopes": ["calendar.readonly"]}` — 1 h, and **narrowed to the scopes you ask for** |
 
 The rail mints your Claude login at every start; you do not need a stored Claude login on a seat.
+
+**On GitHub, your role in the group decides what you get.** On an org whose App reads roles, a viewer gets read-only tokens and an editor can push and create repos. No token, yours or anyone's, can delete, transfer or rename a repo: those stay with the operator. A `403` names the role you have and the one you'd need.
 
 **On GitHub, everyone acts through a shared App bot, and the name is yours.** Your scopes pick the App (`samcloud-agents-core[bot]` and its siblings, one per trust boundary). Each GitHub mint also answers `git_author`: your samcloud name at that bot's address, so commits say who they're from and GitHub links them to the bot. `sc-pr author` applies it to a clone.
 

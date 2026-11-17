@@ -9,8 +9,10 @@ caller's samcloud scopes at mint time. Private keys never leave this host.
 Run: uvicorn main:app --host 0.0.0.0 --port 7781
 """
 
+import asyncio
 import json
 import os
+import re
 import secrets
 import time
 from pathlib import Path
@@ -49,7 +51,7 @@ DEFAULT_PERMISSIONS_RAW = os.environ.get("GH_BROKER_DEFAULT_PERMISSIONS", "").st
 CONFIG_DIR.mkdir(parents=True, exist_ok=True)
 MINTS_LOG.parent.mkdir(parents=True, exist_ok=True)
 
-app = FastAPI(title="gh-broker", version="0.6.0")
+app = FastAPI(title="gh-broker", version="0.7.0")
 
 
 # ---------- App store ------------------------------------------------------
@@ -215,6 +217,82 @@ DEFAULT_PERMISSIONS = normalize_permissions(
 )
 
 
+# ---------- What a token may carry, and for whom (#898) --------------------
+
+# Never in a token, for any caller, admin included: these delete, transfer or
+# rename repos, or change who is in the org. The broker holds `administration`
+# for one job of its own, creating a repo (POST /repos), and hands it to nobody.
+DENIED_PERMISSIONS = frozenset({"administration", "organization_administration", "members"})
+
+# GitHub permissions with no read level: a read-only caller simply goes without.
+WRITE_ONLY_PERMISSIONS = frozenset({"workflows"})
+
+ROLE_RANK = {"viewer": 0, "editor": 1, "owner": 2}
+
+
+def caller_role(identity: dict, app_cfg: dict) -> str:
+    """The caller's best role in the groups an App serves: viewer, editor or owner.
+
+    Only an App marked `role_aware` in apps.json is read this way; any other App
+    treats every caller its scopes admit as before (owner). The admin, or a token
+    scoped `*`, is owner. A group the token is scoped to without a membership row
+    reads as viewer, as the plane reads it (`registry/scope.py: memberships`).
+    """
+    if not app_cfg.get("role_aware"):
+        return "owner"
+    scopes = identity.get("scopes") or []
+    groups = identity.get("groups")
+    if "*" in scopes or groups == "*":
+        return "owner"
+    groups = groups if isinstance(groups, dict) else {}
+    served = [s.split(":", 1)[1] for s in app_cfg.get("allowed_scopes") or [] if s.startswith("group:")]
+    roles = [groups.get(g) or ("viewer" if f"group:{g}" in scopes else None) for g in served]
+    roles = [r for r in roles if r in ROLE_RANK]
+    return max(roles, key=ROLE_RANK.get) if roles else "viewer"
+
+
+def read_only(perms: dict) -> dict:
+    return {k: "read" for k in perms if k not in WRITE_ONLY_PERMISSIONS}
+
+
+def shape_permissions(asked: Optional[dict], grant: dict, role: str) -> tuple[dict, list[str]]:
+    """What the token carries: the ask (or the installation's grant when nothing was
+    asked) without the denied permissions, and read-only for a viewer.
+
+    An explicit ask for a denied permission, or a viewer's explicit ask to write, is
+    refused with 403 rather than quietly narrowed: the caller should know it won't
+    get what it named. Returns (permissions, notes)."""
+    notes = []
+    if asked:
+        denied = sorted(set(asked) & DENIED_PERMISSIONS)
+        if denied:
+            raise HTTPException(403, f"{denied} never goes out in a token. Creating a repo is "
+                                     "POST /repos; deleting or transferring one is not done through the broker")
+        if role == "viewer" and any(v != "read" for v in asked.values()):
+            raise HTTPException(403, "you are a viewer in the group this App serves, so tokens here are "
+                                     "read-only; ask for read, or for editor in that group")
+        return dict(asked), notes
+    perms = {k: v for k, v in grant.items() if k not in DENIED_PERMISSIONS}
+    if len(perms) < len(grant):
+        notes.append("the installation's " + ", ".join(sorted(set(grant) - set(perms)))
+                     + " never goes out in a token, so it was left off")
+    if role == "viewer":
+        perms = read_only(perms)
+        notes.append("you are a viewer in the group this App serves, so this token is read-only")
+    return perms, notes
+
+
+async def installation_grant(app_cfg: dict, inst_id: int) -> dict:
+    """The permissions an installation carries, read from GitHub with the App's JWT."""
+    async with httpx.AsyncClient(timeout=10) as c:
+        r = await c.get(f"https://api.github.com/app/installations/{inst_id}",
+                        headers={"Authorization": f"Bearer {app_jwt(app_cfg)}",
+                                 "Accept": "application/vnd.github+json"})
+    if r.status_code != 200:
+        raise HTTPException(502, f"could not read installation {inst_id}'s permissions: {r.status_code}")
+    return r.json().get("permissions") or {}
+
+
 # ---------- samcloud auth --------------------------------------------------
 
 async def verify_samcloud(authorization: Optional[str]) -> dict:
@@ -237,7 +315,7 @@ def log_mint(entry: dict) -> None:
 
 @app.get("/")
 async def root():
-    return {"service": "gh-broker", "version": "0.4.0", "docs": "/docs"}
+    return {"service": "gh-broker", "version": app.version, "docs": "/docs"}
 
 
 @app.get("/health")
@@ -480,13 +558,17 @@ async def mint_token(req: TokenRequest, authorization: Optional[str] = Header(No
     )
 
     requested = normalize_permissions(req.permissions)
-    effective = requested or DEFAULT_PERMISSIONS
+    role = caller_role(identity, chosen_app)
+    # An unqualified mint gets GH_BROKER_DEFAULT_PERMISSIONS if set, else the
+    # installation's grant; either way it is narrowed, never refused.
+    base = {} if requested else (DEFAULT_PERMISSIONS or await installation_grant(chosen_app, inst_id))
+    effective, shaped_notes = shape_permissions(requested, base, role)
 
-    body: dict = {}
+    # Always name the permissions: an unnamed ask gets the installation's full
+    # grant from GitHub, and that would carry anything added to the App later.
+    body: dict = {"permissions": effective}
     if repos:
         body["repositories"] = [r.split("/", 1)[1] for r in repos]
-    if effective:
-        body["permissions"] = effective
 
     async with httpx.AsyncClient(timeout=15) as c:
         r = await c.post(
@@ -509,13 +591,13 @@ async def mint_token(req: TokenRequest, authorization: Optional[str] = Header(No
     data = r.json()
     granted = data.get("permissions") or {}
 
-    notes = []
+    notes = list(shaped_notes)
     for old, new in moved.items():
         notes.append(f"{old} has moved to {new}; the token is for {new}. Old git URLs redirect,"
                      f" but update the remote: git remote set-url origin https://github.com/{new}.git")
-    if not effective:
+    if not requested:
         notes.append(
-            "No 'permissions' given, so this token carries the installation's full grant ("
+            "No 'permissions' given, so this token carries the installation's grant ("
             + ", ".join(f"{k}:{v}" for k, v in sorted(granted.items()))
             + "). Ask for only what the task needs — {\"permissions\": [\"contents:write\"]}"
             " is enough for a push."
@@ -535,6 +617,7 @@ async def mint_token(req: TokenRequest, authorization: Optional[str] = Header(No
         **({"moved": moved} if moved else {}),
         "permissions": sorted(effective.keys()) if effective else [],
         "narrowed": bool(requested),
+        "role": role,
         "granted": granted,
         "expires_at": data.get("expires_at"),
     })
@@ -546,6 +629,7 @@ async def mint_token(req: TokenRequest, authorization: Optional[str] = Header(No
         "installation_id": inst_id,
         "app_key": chosen_app["key"],
         "app_slug": chosen_app.get("slug"),
+        "role": role,
     }
     author = await git_author(chosen_app, caller_name(identity))
     if author:
@@ -554,6 +638,110 @@ async def mint_token(req: TokenRequest, authorization: Optional[str] = Header(No
         out["moved"] = moved
     if notes:
         out["notes"] = notes
+    return out
+
+
+# ---------- Create a repo (#898) --------------------------------------------
+
+REPO_NAME = re.compile(r"^[A-Za-z0-9._-]{1,100}$")
+
+
+class RepoCreate(BaseModel):
+    org: str = Field(description="the org to create it in; an App the caller's scopes admit must be installed there")
+    name: str = Field(description="repository name")
+    description: str = Field(default="", description="one line")
+    private: bool = Field(default=True, description="only private repos are created here; going public is the operator's step")
+    auto_init: bool = Field(default=False, description="create a first commit with a README")
+
+
+async def _installation_token(c, app_cfg: dict, inst_id: int, body: dict) -> dict:
+    return await c.post(f"https://api.github.com/app/installations/{inst_id}/access_tokens",
+                        headers={"Authorization": f"Bearer {app_jwt(app_cfg)}",
+                                 "Accept": "application/vnd.github+json"},
+                        json=body)
+
+
+@app.post("/repos")
+async def create_repo(req: RepoCreate, authorization: Optional[str] = Header(None)):
+    """Create a private repo in an org, for an editor or owner of the group its App serves.
+
+    The broker creates it with an administration token of its own, which never
+    leaves this process, and answers a push token for the new repo (contents and
+    pull requests, write) as /token would. Nobody deletes or transfers through here."""
+    identity = await verify_samcloud(authorization)
+    if not REPO_NAME.match(req.name) or req.name.lower().endswith(".git") or req.name in (".", ".."):
+        raise HTTPException(400, f"not a repository name: {req.name!r}")
+    if not req.private:
+        raise HTTPException(403, "repos are created private here; making one public is the operator's step, "
+                                 "behind the history scan for secrets")
+    candidates = apps_for_scopes(identity.get("scopes", []))
+    if not candidates:
+        raise HTTPException(403, "no Apps available for your samcloud scopes")
+    chosen_app, inst_id = await _resolve_app_and_installation(candidates, [f"{req.org}/{req.name}"], None, None)
+    if not chosen_app.get("role_aware"):
+        raise HTTPException(403, f"App '{chosen_app['key']}' does not create repos; only Apps marked "
+                                 "role_aware in apps.json do, for the editors of the groups they serve")
+    role = caller_role(identity, chosen_app)
+    if ROLE_RANK[role] < ROLE_RANK["editor"]:
+        raise HTTPException(403, f"creating a repo in {req.org} needs editor in a group App "
+                                 f"'{chosen_app['key']}' serves ({chosen_app.get('allowed_scopes')}); you are {role}")
+
+    async with httpx.AsyncClient(timeout=20) as c:
+        r = await _installation_token(c, chosen_app, inst_id,
+                                      {"permissions": {"administration": "write", "metadata": "read"}})
+        if r.status_code not in (200, 201):
+            raise HTTPException(409, f"App '{chosen_app['key']}' can't create repos yet: its installation on "
+                                     f"{req.org} has no Administration permission ({r.status_code})")
+        admin_token = r.json()["token"]
+        r = await c.post(f"https://api.github.com/orgs/{req.org}/repos",
+                         headers={"Authorization": f"token {admin_token}",
+                                  "Accept": "application/vnd.github+json"},
+                         json={"name": req.name, "description": req.description,
+                               "private": True, "auto_init": req.auto_init})
+        if r.status_code == 422:
+            raise HTTPException(409, f"GitHub refused {req.org}/{req.name}: {r.text[:300]}")
+        if r.status_code not in (200, 201):
+            raise HTTPException(r.status_code, f"GitHub refused the create: {r.text[:300]}")
+        repo = r.json()
+
+        # The App sees a repo it just made only after a moment; try a few times.
+        push = None
+        for _ in range(5):
+            t = await _installation_token(c, chosen_app, inst_id, {
+                "repositories": [req.name],
+                "permissions": {"contents": "write", "pull_requests": "write", "metadata": "read"}})
+            if t.status_code in (200, 201):
+                push = t.json()
+                break
+            await asyncio.sleep(2)
+
+    log_mint({
+        "action": "create_repo",
+        "identity": caller_name(identity),
+        "scopes": identity.get("scopes", []),
+        "app_key": chosen_app["key"],
+        "installation_id": inst_id,
+        "repos": [repo["full_name"]],
+        "role": role,
+        "private": repo.get("private"),
+    })
+    out = {
+        "repo": repo["full_name"],
+        "html_url": repo.get("html_url"),
+        "clone_url": repo.get("clone_url"),
+        "private": repo.get("private"),
+        "default_branch": repo.get("default_branch"),
+        "app_key": chosen_app["key"],
+        "role": role,
+    }
+    if push:
+        out.update({"token": push["token"], "expires_at": push["expires_at"],
+                    "permissions": push.get("permissions")})
+        author = await git_author(chosen_app, caller_name(identity))
+        if author:
+            out["git_author"] = author
+    else:
+        out["notes"] = ["the repo exists, but a push token wasn't ready yet: POST /token for it in a moment"]
     return out
 
 
