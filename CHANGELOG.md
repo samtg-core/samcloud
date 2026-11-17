@@ -2,6 +2,14 @@
 
 What each release changed.
 
+## 2026-11-17 — gh-broker 0.7.0: agents create repos in their own scope; no token can delete one
+
+- **`POST /repos` creates a private repo** in an org whose App is marked `role_aware`, for an editor or owner of a group that App serves (task 898; design in the plane doc "Repo migration", section "agents create repos in their own scope"). The broker creates it with an `administration` token that never leaves the process, and answers a push token for the new repo plus `git_author`. Viewers, public repos, bad names and Apps without the flag are refused; an installation without Administration answers `409` and creates nothing. Every create is audited (`"action": "create_repo"`, with the role).
+- **`administration`, `organization_administration` and `members` never go out in a token**, for any caller, admin included. The broker now always names the permissions it asks GitHub for: an unqualified mint asks for the installation's grant minus those, so a permission added to an App later can't reach a token by default. This is what makes it safe to give the org Apps Administration, and it has to be live before they get it.
+- **Role-aware tokens** on Apps marked `role_aware`: a viewer of the groups the App serves gets read-only (an unqualified mint is narrowed; an explicit write is `403`). Editors and owners are unchanged. Apps without the flag behave as before. Answers and audit lines carry `role`.
+- `/` reports the running version from the app (it said 0.4.0 under 0.6.0).
+- Records: `docs/Credential Brokers.md`, `auth.md` 3.3.0. Test: `sandbox/test_broker_repos.py` (22 checks; fails on 0.6.0); `sandbox/test_broker_identity.py` unchanged and passing.
+
 ## 2026-11-14 — Hosts can observe their own group-member authority (#18)
 
 - A host-local service can read its exact member's current group generation and lease authority without visibility of the other hosts or a copied coordinator credential. The projection hides other members, intent and evidence and is not cacheable.
