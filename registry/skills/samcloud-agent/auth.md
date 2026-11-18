@@ -1,4 +1,4 @@
-<!-- SKILL_VERSION: 3.2.4 -->
+<!-- SKILL_VERSION: 3.2.5 -->
 # auth — your token, what it can see, and logins to other systems
 
 Your token is who you are on the plane. A broker swaps it for a short-lived login to another system, so nothing long-lived sits on a seat (one agent identity on one machine).
@@ -59,7 +59,7 @@ Ask a broker when you need one. Send your token; it returns a login that expires
 | you need | call |
 |---|---|
 | a Claude login for a headless `claude -p` run | `curl -s -H @"$HOME/.samcloud/token.hdr" __GOOGLE_BROKER__/claude-token` answers `{"token": …}`; export it as `CLAUDE_CODE_OAUTH_TOKEN` for that run |
-| a GitHub token scoped to one repository | `POST __GH_BROKER__/token {"repos": ["owner/name"]}` |
+| a GitHub token scoped to one repository | `POST __GH_BROKER__/token {"repos": ["owner/name"], "permissions": ["contents:write", "pull_requests:write"]}` to push and open or merge PRs. Name the level: a bare `"pull_requests"` mints **read**, and the PR call then fails |
 | AWS credentials for a role | `POST __AWS_BROKER__/token {"agent_scope": "…", "role": "…"}` — `GET __AWS_BROKER__/docs` shows every field |
 | adb (Android's device shell) on a shared box | `samadb shell <cmd>` — takes a lease for you, with a queue, then runs adb (it ships with the adb broker, `adb-broker/samadb` in the samcloud repo) |
 | a Google access token for an enrolled account | `POST __GOOGLE_BROKER__/mint {"account": "<key>", "scopes": ["calendar.readonly"]}` — 1 h, and **narrowed to the scopes you ask for** |

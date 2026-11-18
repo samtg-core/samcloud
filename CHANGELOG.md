@@ -2,6 +2,10 @@
 
 What each release changed.
 
+## 2026-11-19 — The auth skill names the GitHub write levels
+
+- The GitHub row in `auth.md` now mints with `"permissions": ["contents:write", "pull_requests:write"]` and says that a bare `"pull_requests"` mints read. A seat's own credential helper asked for bare names, got `pull_requests: read`, and its PR call failed (ticket 1107). The broker is unchanged.
+
 ## 2026-11-19 — Continuation uses the ordinary lease ledger
 
 - Check competing ownership with the same `occupying` predicate as normal admission. The initial continuation query incorrectly counted expired queued waits and old non-HOLD rows as charged capacity, so a retained pool could refuse despite having no competing hold.
