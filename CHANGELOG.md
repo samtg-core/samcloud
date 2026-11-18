@@ -2,6 +2,13 @@
 
 What each release changed.
 
+## 2026-11-19 — Atomically continue a cleaned-up expired HOLD pool
+
+- An owner/admin with current access to every host can explicitly attest cleanup of every exact expired/unsettled member of a never-serving setup and transfer the same already-charged pool to a fresh bounded successor. Settlement, coordinator fencing and replacement leases commit together; ordinary waiters see no free-capacity window or intervening promotion.
+- Owner, resources, sizes, TTLs and effective exposure bounds are unchanged. The original intent and expired leases remain history, linked to the successor. No worker is started, expired lease resurrected or inference retried; unbounded active-session lifetime remains a separate contract.
+- Missing, changed, foreign, active, partial or already-settled claims, another charged allocation, revoked access, prior serving and a release request refuse atomically. Exact replays return the successor's current state; conflicting intent never allocates again.
+- HTTP/SQLite controls cover ownership, same-pool transfer, independent fresh authority, current-state replay, repeated expiry, queue order, concurrency, partial-write/commit rollback and post-commit publication.
+
 ## 2026-11-14 — Hosts can observe their own group-member authority (#18)
 
 - A host-local service can read its exact member's current group generation and lease authority without visibility of the other hosts or a copied coordinator credential. The projection hides other members, intent and evidence and is not cacheable.
