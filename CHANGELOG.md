@@ -2,6 +2,11 @@
 
 What each release changed.
 
+## 2026-11-19 — Continuation uses the ordinary lease ledger
+
+- Check competing ownership with the same `occupying` predicate as normal admission. The initial continuation query incorrectly counted expired queued waits and old non-HOLD rows as charged capacity, so a retained pool could refuse despite having no competing hold.
+- Keep every historical row unchanged. Active leases and real expired/unsettled TTL holds still block the transfer. HTTP/SQLite regressions cover both noncharging history shapes and a competing real HOLD.
+
 ## 2026-11-19 — Atomically continue a cleaned-up expired HOLD pool
 
 - An owner/admin with current access to every host can explicitly attest cleanup of every exact expired/unsettled member of a never-serving setup and transfer the same already-charged pool to a fresh bounded successor. Settlement, coordinator fencing and replacement leases commit together; ordinary waiters see no free-capacity window or intervening promotion.

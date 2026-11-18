@@ -1,4 +1,4 @@
-<!-- SKILL_VERSION: 3.18.7 -->
+<!-- SKILL_VERSION: 3.18.8 -->
 # tools — the API, the write tool, the helpers, the machines
 
 ## The API
@@ -362,3 +362,7 @@ Both refusals leave nothing behind, so neither needs cleaning up after.
 
 Read this page again, then file a ticket with the pen so it joins the work:
 `sc-new ticket --summary "…" --assignee __ADMIN__ < detail.md`.
+
+Continuation uses ordinary lease accounting for competing ownership. Historical
+expired waits and legacy non-HOLD expiries are not charged; active leases and
+expired/unsettled TTL holds still block. It never deletes historical rows.
