@@ -208,6 +208,10 @@ def _advance(conn, group_id, effects, *, default_ttl, total_floor, total_hard):
 
 def _view(conn, group_id):
     group = _group(conn, group_id)
+    prior = conn.execute('SELECT predecessor_id FROM lease_group_continuations WHERE successor_id=?',
+                         (group_id,)).fetchone()
+    following = conn.execute('SELECT successor_id FROM lease_group_continuations WHERE predecessor_id=?',
+                             (group_id,)).fetchone()
     members = []
     for member in _members(conn, group_id):
         lease = _lease(conn, member)
@@ -223,6 +227,8 @@ def _view(conn, group_id):
                             if member['cleanup_evidence'] else None,
                         'release_receipt': receipt})
     return {'id': group_id, 'owner_id': group['owner_id'], 'request_key': group['request_key'],
+            'continued_from': prior['predecessor_id'] if prior else None,
+            'continued_to': following['successor_id'] if following else None,
             'phase': group['phase'], 'generation': group['generation'],
             'release_requested': bool(group['release_requested']), 'reason': group['reason'],
             'intent_sha256': group['intent_sha256'], 'members': members,

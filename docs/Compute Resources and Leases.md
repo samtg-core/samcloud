@@ -168,6 +168,38 @@ starts draining. It rejects commands from an older coordinator; it does not kill
 a worker or prove that its memory is free. A replacement coordinator can finish
 cleanup using the current generation without erasing prior receipts.
 
+For an explicitly bounded **setup that never reached serving** and ran out of
+authority while its entire pool remains charged under HOLD,
+`POST /{id}/continue-after-cleanup` transfers
+the same pool to a fresh, bounded successor **after provider-observed cleanup**.
+The body is `{generation, request_key, members:[{lease_id, evidence_ref,
+evidence_sha256}]}`. The key names the successor; cleanup must name every exact
+old member once. Each predecessor must be expired, unsettled, exclusive, still
+owned by the original holder and on its original HOLD resource. Partial expiry,
+queued/active/missing/changed members, another charged allocation, a changed
+declared capacity below the held envelope, existing settlement or a release request
+refuse the whole operation.
+
+All old settlements, the old coordinator fence and the successor's new leases
+commit in one transaction. Capacity never becomes available between them and
+ordinary waiters keep their order. The successor inherits the exact owner,
+resources, sizes, TTLs and effective exposure bounds. The old expired lease rows
+and original intent remain history; no lease is resurrected. The response is the
+successor group, with `continued_from`; the old group reports `continued_to`.
+A replay returns that successor's **current** state, even if it has since ended
+or expired. Conflicting keys, generations or evidence refuse rather than acquire
+again. An existing successor key is never adopted or displaced.
+
+The owner/admin must still have visibility of every member for this transfer.
+Cleanup is the provider's attributed attestation, as for member release; core
+does not inspect a process, start EXO, retry an inference or decide physical fit.
+Providers must positively end the old work, bind the fresh group and independently
+read every member's new authority before starting. This bounded recovery does
+**not** implement an unbounded active-session lifetime, extend a running job's
+deadline, or change ordinary renewal/expiry semantics.
+Previously serving turns must use ordinary cleanup and queued admission; this
+setup-recovery route cannot become an automatic way around their exposure bound.
+
 The owner and admin may mutate the group. Full-group and event-history readers
 must see every member resource; seeing one host is insufficient. Fresh acquisition and serving also
 require current access to all hosts. The owner retains read/cleanup access after

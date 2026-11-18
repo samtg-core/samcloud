@@ -522,6 +522,18 @@ CREATE TABLE IF NOT EXISTS lease_group_events (
 CREATE INDEX IF NOT EXISTS idx_lease_group_events_group
     ON lease_group_events(group_id, sequence);
 
+-- Explicit recovery of an entirely expired HOLD group after attributed cleanup.
+-- Both old settlement and same-sized successor ownership commit together. This
+-- is not renewal, process-death detection, a scheduler or permission to replay.
+CREATE TABLE IF NOT EXISTS lease_group_continuations (
+    predecessor_id TEXT PRIMARY KEY REFERENCES lease_groups(id),
+    successor_id TEXT NOT NULL UNIQUE REFERENCES lease_groups(id),
+    intent_sha256 TEXT NOT NULL,
+    intent_json TEXT NOT NULL,
+    actor TEXT NOT NULL,
+    created_at TEXT NOT NULL
+);
+
 -- ===== Indexes =====
 CREATE INDEX IF NOT EXISTS idx_resources_device ON resources(device_id);
 CREATE INDEX IF NOT EXISTS idx_resources_type ON resources(type);

@@ -28,7 +28,7 @@ from fastapi import (FastAPI, File, Form, HTTPException, Header, Request, Respon
                      UploadFile)
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, PlainTextResponse, StreamingResponse
-from pydantic import BaseModel, ConfigDict, Field, model_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 from typing import Optional
 from pathlib import Path
 
@@ -139,6 +139,7 @@ from lease_admission import (release as release_lease_rows, reap_and_promote as 
                              queue_view as lease_queue_view, unsettled_view as lease_unsettled_view,
                              UNSETTLED as LEASE_UNSETTLED)
 import lease_groups
+import lease_group_continuations
 import ports as port_alloc
 import scope as groupscope   # scope v1 (doc 261) — aliased: many routes hold a local `scope` string
 
@@ -1042,6 +1043,36 @@ class LeaseGroupAttestation(LeaseGroupCommand):
 
 class LeaseGroupFence(LeaseGroupCommand):
     reason: str = Field(min_length=1, max_length=512)
+
+
+def _group_cleanup_text(value):
+    if isinstance(value, str):
+        try:
+            value.encode('utf-8')
+        except UnicodeEncodeError:
+            raise HTTPException(422, 'Continuation identifiers and references must be valid UTF-8') from None
+    return value
+
+
+class LeaseGroupCleanupProof(StrictModel):
+    lease_id: str = Field(min_length=1, max_length=128)
+    evidence_ref: str = Field(min_length=1, max_length=512)
+    evidence_sha256: str = Field(pattern=r"^[a-f0-9]{64}$")
+
+    @field_validator('lease_id', 'evidence_ref', 'evidence_sha256', mode='before')
+    @classmethod
+    def valid_encoding(cls, value):
+        return _group_cleanup_text(value)
+
+
+class LeaseGroupContinuation(LeaseGroupCommand):
+    request_key: str = Field(min_length=1, max_length=128)
+    members: list[LeaseGroupCleanupProof] = Field(min_length=2, max_length=16)
+
+    @field_validator('request_key', mode='before')
+    @classmethod
+    def valid_encoding(cls, value):
+        return _group_cleanup_text(value)
 
 
 class TicketUpdate(StrictModel):
@@ -9377,6 +9408,7 @@ def api_index():
                 "release": {"method": "POST", "path": "/api/v1/lease-groups/{id}/release", "auth": "owner/admin", "description": "Body {generation}: cancel queued members, retain active members for cleanup. Expiry alone cannot settle HOLD."},
                 "release_member": {"method": "POST", "path": "/api/v1/lease-groups/{id}/members/{lease_id}/release", "auth": "owner/admin", "description": "Body {generation,evidence_ref,evidence_sha256}: attributed cleanup plus exact member release/settlement receipt, one transaction."},
                 "fence": {"method": "POST", "path": "/api/v1/lease-groups/{id}/fence", "auth": "owner/admin", "description": "Body {generation,reason}: advance coordinator generation and begin draining. Never infer process death or retry work."},
+                "continue_after_cleanup": {"method": "POST", "path": "/api/v1/lease-groups/{id}/continue-after-cleanup", "auth": "owner/admin and all members visible", "description": "Explicit bounded successor for a never-serving setup after every exact member is expired/unsettled under HOLD and its provider attests cleanup. Body {generation,request_key,members:[{lease_id,evidence_ref,evidence_sha256}]}. Same owner, resources, sizes, TTLs and exposure bounds; atomic settlement/replacement without a free-capacity window or queue promotion. Current successor on replay. No worker start, lease resurrection or inference retry."},
             },
             "events": {
                 "stream": {"method": "GET", "path": "/api/v1/events", "auth": "any", "description": "SSE stream — real-time notifications"},
@@ -12300,6 +12332,16 @@ def fence_lease_group(group_id: str, req: LeaseGroupFence,
     return _publish_lease_group(lease_groups.fence(
         db, group_id, req.generation, req.reason, auth.owner_id,
         default_ttl=EXCLUSIVE_DEFAULT_TTL_S))
+
+
+@app.post('/api/v1/lease-groups/{group_id}/continue-after-cleanup')
+def continue_lease_group(group_id: str, req: LeaseGroupContinuation,
+                         auth: AuthContext = Depends(get_auth)):
+    _require_lease_group(auth, group_id, mutate=True, acquire=True)
+    return _publish_lease_group(lease_group_continuations.continue_after_cleanup(
+        db, group_id, req.model_dump(), auth.owner_id,
+        default_ttl=EXCLUSIVE_DEFAULT_TTL_S,
+        total_floor=LEASE_MAX_TOTAL_S, total_hard=LEASE_MAX_TOTAL_HARD_S))
 
 @app.post("/api/v1/resources/{resource_id:path}/leases")
 def request_lease(resource_id: str, req: LeaseRequest, auth: AuthContext = Depends(get_auth)):

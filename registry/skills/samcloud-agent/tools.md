@@ -1,4 +1,4 @@
-<!-- SKILL_VERSION: 3.18.6 -->
+<!-- SKILL_VERSION: 3.18.7 -->
 # tools — the API, the write tool, the helpers, the machines
 
 ## The API
@@ -234,6 +234,19 @@ does not prove cleanup. Missing evidence or a missing lease leaves the group
 uncertain; do not retry with a new group key. `POST /{id}/fence` (`generation`,
 `reason`) invalidates old coordinator commands and drains; it does not stop a
 process. Durable history: `GET /{id}/events?after=N&limit=100` (maximum 500).
+For a never-serving setup with an entirely expired/unsettled HOLD pool, the owner/admin with current access
+to all hosts may explicitly POST `/{id}/continue-after-cleanup` with
+`{generation,request_key,members:[{lease_id,evidence_ref,evidence_sha256}]}`.
+First positively observe cleanup on every exact old lease. Core atomically
+settles those predecessors and creates a fresh bounded successor with the same
+owner/resources/sizes/TTLs/exposure bounds, without a free-capacity window or an
+intervening queue promotion. Partial/active/changed/foreign/settled claims or a
+release request refuse. Replays return the current successor; conflicts refuse.
+`continued_from`/`continued_to` link the groups. No expired lease is resurrected,
+no process is started, and no inference is retried. This is explicit bounded
+recovery, not unbounded turn lifetime or permission to extend unknown work.
+An operation that already reached serving cannot use it to avoid normal cleanup
+and queued admission at its exposure bound.
 Only the owner/admin changes a group; full-group/history readers must see every
 member. A host-local supervisor can instead GET
 `/lease-groups/{id}/members/{lease_id}/authority` with visibility of that exact
