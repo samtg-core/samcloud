@@ -328,3 +328,34 @@ def test_untyped_or_unrecorded_controls_refuse_without_changes(client, hosts, ex
                          headers={'Content-Type': 'application/json'})
     assert result.status_code == 422
     assert snapshot() == before
+
+
+@pytest.mark.parametrize('reason', ['wait_expired', None])
+def test_noncharging_expired_history_does_not_block_the_held_pool(client, hosts, reason):
+    old = expired_group(client, hosts)
+    db.execute("INSERT INTO leases(id,resource_id,agent_id,memory_mb,exclusive,status,"
+               "expiry_reason,settled_at,granted_at,expires_at) "
+               "VALUES ('historical',?,'user:history',100,0,'expired',?,NULL,?,?)",
+               (hosts[0], reason, None if reason else '2026-10-01T00:00:00+00:00',
+                '2026-10-01T01:00:00+00:00'))
+    prior = db.query_one("SELECT * FROM leases WHERE id='historical'")
+    assert client.get('/api/v1/resources/'+hosts[0]).json()['unsettled'] == [
+        {'lease_id': old['members'][0]['lease_id'], 'service_id': None,
+         'agent_id': old['owner_id'], 'memory_mb': 1000, 'exclusive': True,
+         'expired_at': old['members'][0]['expires_at']}]
+    response = send(client, old)
+    assert response.status_code == 200, response.text
+    assert response.json()['phase'] == 'admitted'
+    assert db.query_one("SELECT * FROM leases WHERE id='historical'") == prior
+    assert db.query_one("SELECT COUNT(*) n FROM leases WHERE status='active'")['n'] == 3
+
+
+def test_another_real_expired_hold_still_blocks_continuation(client, hosts):
+    old = expired_group(client, hosts)
+    db.execute("INSERT INTO leases(id,resource_id,agent_id,memory_mb,exclusive,status,"
+               "expiry_reason,settled_at,granted_at,expires_at) "
+               "VALUES ('real-hold',?,'user:other',100,0,'expired','ttl_expired',NULL,?,?)",
+               (hosts[0], '2026-10-01T00:00:00+00:00', '2026-10-01T01:00:00+00:00'))
+    before = snapshot()
+    assert send(client, old).status_code == 409
+    assert snapshot() == before

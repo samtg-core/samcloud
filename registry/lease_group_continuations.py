@@ -13,7 +13,7 @@ import secrets
 from fastapi import HTTPException
 
 import lease_groups as groups
-from lease_admission import holds_on_expiry
+from lease_admission import holds_on_expiry, occupying
 
 
 def _intent(request):
@@ -62,10 +62,9 @@ def _predecessors(conn, group, proof, *, total_floor, total_hard, now):
         # An exclusive predecessor must still be the whole charged allocation.
         # Queued callers keep their order, but a conflicting live/held allocation
         # is never hidden by crediting our predecessor.
-        other = conn.execute("SELECT id FROM leases WHERE resource_id=? AND id!=? AND "
-                             "(status='active' OR (status='expired' AND settled_at IS NULL))",
-                             (lease['resource_id'], lease['id'])).fetchone()
-        if other:
+        # Use the same accounting predicate as ordinary admission. Historical
+        # wait expiries and legacy non-HOLD rows never charge today's pool.
+        if any(row['id'] != lease['id'] for row in occupying(conn, resource)):
             raise HTTPException(409, 'Another allocation is charged on a member resource')
         checked.append((member, requested, lease, supplied[lease['id']]))
     return intent, checked

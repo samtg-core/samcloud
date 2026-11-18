@@ -413,3 +413,9 @@ These leases live in the broker, not in `/api/v1/leases`, and the broker checks 
 - The served skill page `tools.md` (`GET /api/v1/skills/samcloud-agent/tools.md`) has the agent's version under Machines, and `auth.md` mentions `samadb` ([Skills](Skills.md)).
 
 Next: [Notifications and Subscriptions](Notifications%20and%20Subscriptions.md)
+
+Continuation checks other charged ownership with the same `occupying` predicate
+as ordinary lease admission. An expired queued wait or a legacy expired row
+without `ttl_expired` does not charge HOLD capacity and does not block this
+transfer. Active leases and expired, unsettled `ttl_expired` leases still do.
+Historical rows are preserved unchanged.
