@@ -2,6 +2,10 @@
 
 What each release changed.
 
+## 2026-11-19 — An access target's bootstrap has a QR
+
+- Enrolling an access target (or both) shows a QR beside the bootstrap commands. Scanned on the device, it opens `/b/<token>`, which shows `curl -s …/api/v1/bootstrap/<token> | bash` to copy, with no sign-in, as `/p/<code>` does for a route's pair link. For a headset or phone where typing the URL is the hard part (ticket 1110). The token is the same one-hour, single-use enrolment token the page already showed.
+
 ## 2026-11-19 — Continuation uses the ordinary lease ledger
 
 - Check competing ownership with the same `occupying` predicate as normal admission. The initial continuation query incorrectly counted expired queued waits and old non-HOLD rows as charged capacity, so a retained pool could refuse despite having no competing hold.

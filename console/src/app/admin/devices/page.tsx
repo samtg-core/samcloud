@@ -2,6 +2,7 @@
 
 import { useState, useEffect, useCallback } from 'react';
 import DeviceModal from '@/components/DeviceModal';
+import { QrCode } from '@/components/QrCode';
 
 interface Device {
   id: string;
@@ -469,6 +470,18 @@ function EnrollResultCard({ result, isRouteOnly }: { result: EnrollResult; isRou
       <p className="text-xs text-zinc-400">
         <strong className="text-zinc-200">{result.name}</strong> is pending. Run the bootstrap on the device.
       </p>
+
+      {/* A QR for a device with a camera and no easy keyboard (a headset, a phone): it opens /b/<token>,
+          which shows the command to copy, as a route's pair link does (#1110). */}
+      {result.token && typeof window !== 'undefined' && (
+        <div className="flex flex-col sm:flex-row items-center gap-4">
+          <QrCode text={`${window.location.origin}/b/${result.token}`} />
+          <div className="space-y-2 text-sm text-zinc-400">
+            <p className="text-blue-400 font-medium">On the device, scan this</p>
+            <p>then copy the command it shows and paste it into a terminal there.</p>
+          </div>
+        </div>
+      )}
 
       {/* Bootstrap commands */}
       {bashCmd && (

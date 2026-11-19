@@ -20,7 +20,7 @@ Most first runs look the same. A person opens the dashboard, adds the device, an
 
 What comes back depends on the mode:
 
-- **A target, or both,** shows "Device Created — Awaiting Bootstrap", with the bootstrap command for macOS, Linux and WSL, the PowerShell command for Windows, the token, the bootstrap URL, and the tunnel port. Copy the command and hand it to the agent on that machine, or run it there.
+- **A target, or both,** shows "Device Created — Awaiting Bootstrap", with the bootstrap command for macOS, Linux and WSL, the PowerShell command for Windows, the token, the bootstrap URL, and the tunnel port. Copy the command and hand it to the agent on that machine, or run it there. For a machine with a camera and no easy keyboard (a headset running a terminal app, a phone), it also shows a QR: scanned there, it opens `/b/<token>`, which shows the command to copy, with no sign-in, as a route's pair link does.
 - **A route-only device** shows "Device Enrolled — Ready for Pairing" and a **Generate Access Key** button, which opens the pair page for it.
 
 ![Adding a device and its bootstrap helper](images/device-enrol.png)
