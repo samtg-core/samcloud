@@ -6756,6 +6756,89 @@ class TestGatewayHostKey:
         assert r.returncode == 0, r.stdout + r.stderr
         assert "CONTINUED" in r.stdout
 
+    # --- Termux: Linux underneath, an Android app's userland on top (ticket 1110) ---
+    #
+    # The first try on a Quest 3 stopped at `mktemp /tmp/...`: Termux has no /tmp. Past
+    # that it would have needed sudo, apt-get, `service` and systemd, none of which it has.
+
+    def test_the_piped_copy_goes_in_tmpdir(self):
+        b = self._bootstrap()
+        assert 'mktemp "${TMPDIR:-/tmp}/samcloud-bootstrap-XXXXXX"' in b
+        assert "mktemp /tmp/" not in b
+
+    def test_termux_is_told_apart_from_linux(self, tmp_path):
+        b = self._bootstrap()
+        piece = b[b.index("detect_os() {"):b.index("OS=$(detect_os)")]
+        stub = tmp_path / "bin"
+        stub.mkdir()
+        (stub / "uname").write_text("#!/bin/sh\necho Linux\n")
+        (stub / "uname").chmod(0o755)
+        path = {"PATH": f"{stub}:/usr/bin:/bin"}
+        r = self._run(piece + "detect_os\n", tmp_path, {**path, "TERMUX_VERSION": "0.118.0"})
+        assert r.stdout.strip() == "termux", r.stdout + r.stderr
+        r = self._run(piece + "detect_os\n", tmp_path,
+                      {**path, "PREFIX": "/data/data/com.termux/files/usr"})
+        assert r.stdout.strip() == "termux", r.stdout + r.stderr
+        r = self._run(piece + "detect_os\n", tmp_path, path)
+        assert r.stdout.strip() in ("linux", "wsl"), r.stdout + r.stderr
+
+    def test_termux_prerequisites_never_ask_for_sudo(self):
+        b = self._bootstrap()
+        block = b[b.index('if [[ -n "$TUNNEL" && "$OS" == "termux" ]]'):b.index("# Every answer from the registry")]
+        assert "sudo" not in block
+        assert "pkg install -y openssh python" in block
+        termux_unit = b[b.index("        termux)\n            # No systemd."):b.index("BOOT_EOF\n            chmod")]
+        assert "sudo" not in termux_unit and "systemctl" not in termux_unit
+
+    def test_termux_sshd_port_is_8022_without_sudo(self, tmp_path):
+        b = self._bootstrap()
+        piece = b[b.index('LOCAL_SSH_PORT=""'):b.index('info "Local sshd port')]
+        stub = tmp_path / "bin"
+        stub.mkdir()
+        # A sudo that would be noticed: the Termux path must not reach it.
+        (stub / "sudo").write_text("#!/bin/sh\necho SUDO-CALLED >&2\nexit 1\n")
+        (stub / "sudo").chmod(0o755)
+        env = {"PATH": f"{stub}:/usr/bin:/bin"}
+        r = self._run("OS=termux\n" + piece + 'echo "PORT=$LOCAL_SSH_PORT"\n', tmp_path, env)
+        assert "PORT=8022" in r.stdout, r.stdout + r.stderr
+        assert "SUDO-CALLED" not in r.stderr
+
+        (stub / "sshd").write_text('#!/bin/sh\n[ "$1" = -T ] && echo "port 9022"\n')
+        (stub / "sshd").chmod(0o755)
+        r = self._run("OS=termux\n" + piece + 'echo "PORT=$LOCAL_SSH_PORT"\n', tmp_path, env)
+        assert "PORT=9022" in r.stdout, r.stdout + r.stderr
+        assert "SUDO-CALLED" not in r.stderr
+
+    def test_termux_boot_script_starts_the_runner(self, tmp_path):
+        """No systemd: the boot script is what starts the tunnel, now and after a reboot."""
+        import time
+        b = self._bootstrap()
+        piece = b[b.index("        termux)\n            # No systemd."):]
+        piece = piece[piece.index("BOOT="):piece.index("            ;;")]
+        prefix = tmp_path / "usr"
+        (prefix / "bin").mkdir(parents=True)
+        (prefix / "bin" / "sh").symlink_to("/bin/sh")
+        for name in ("termux-wake-lock", "sshd"):
+            (prefix / "bin" / name).write_text("#!/bin/sh\nexit 0\n")
+            (prefix / "bin" / name).chmod(0o755)
+        cfg = tmp_path / "cfg"
+        cfg.mkdir()
+        marker = tmp_path / "ran"
+        runner = cfg / "tunnel.sh"
+        runner.write_text(f"#!/bin/sh\necho up > {marker}\n")
+        script = (f'PREFIX={prefix}\nDEVICE=quest\nUNIT=samcloud-tunnel-quest\n'
+                  f'RUNNER={runner}\nCFG_DIR={cfg}\n' + piece)
+        r = self._run(script, tmp_path, {"PATH": f"{prefix}/bin:/usr/bin:/bin"})
+        assert r.returncode == 0, r.stdout + r.stderr
+        assert "OK Tunnel started" in r.stdout
+        boot = tmp_path / ".termux" / "boot" / "samcloud-tunnel-quest"
+        assert boot.read_text().startswith(f"#!{prefix}/bin/sh\n")
+        for _ in range(50):
+            if marker.exists():
+                break
+            time.sleep(0.1)
+        assert marker.read_text().strip() == "up"
+
     def _activation_piece(self) -> str:
         b = self._bootstrap()
         start = b.index("json_get() {")

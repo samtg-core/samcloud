@@ -41,6 +41,7 @@ Caddy reached nothing at the route's target.
    | Linux, WSL | systemd unit `samcloud-tunnel-DEVICE` |
    | macOS | LaunchAgent `com.samcloud.tunnel-DEVICE` |
    | Windows | scheduled task `samcloud-tunnel-DEVICE` |
+   | Termux | boot script `~/.termux/boot/samcloud-tunnel-DEVICE`, log `~/.config/samcloud/tunnel.log` |
 
    A plane whose `SAMCLOUD_ENV` isn't `prod` adds its name: `samcloud-lab-tunnel-DEVICE`, `com.samcloud.lab.tunnel-DEVICE`, `samcloud-lab-tunnel-DEVICE`.
 3. Check the unit on the device, by whatever other way you reach it. If the tunnel port still answers, the gateway reaches the device through it:
