@@ -14,6 +14,7 @@ Four pages work before you sign in. Every other page sends you to `/login` first
 | `/login` | Sign in with a username and password. Each sign-in is its own login token, valid for a week, and starts a new dashboard conversation (see [Around every page](#around-every-page)). |
 | `/invite/<token>` | Where an invited person activates. It shows the username, role, scope and the services already in scope, takes a password, and shows the API token once. |
 | `/pair` | Makes a single-use pair command for a machine with no samcloud token: run it there and it makes a key pair, installs it and configures `ssh samcloud`. It shows a QR and a short address, `/p/<code>`. Opened on the new device, that page shows the command to copy, with no sign-in. It works once, within an hour. *Or generate in browser* makes the key pair here instead, for you to install by hand. Making either needs you signed in. |
+| `/b/<token>` | What an access target's QR opens on the new device: its bootstrap command to copy, with no sign-in. The token is the one-hour, single-use enrolment token, so the page works as long as the token does. |
 
 ![First-run setup](images/setup.png)
 

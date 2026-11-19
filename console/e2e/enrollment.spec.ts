@@ -108,6 +108,26 @@ test.describe('Admin Devices Page', () => {
     await expect(page.getByText('Token:')).toBeVisible();
   });
 
+  test('a target shows a QR whose address shows its bootstrap command with no session', async ({ page, browser }) => {
+    await page.goto('/admin/devices');
+    await page.getByText('Access Target').first().click();
+    await page.getByPlaceholder('Device ID *').fill(`pw-target-qr-${Date.now()}`);
+    await page.getByPlaceholder('Type (phone, server, etc)').fill('headset');
+    await page.locator('select').last().selectOption('reverse-tunnel');
+    await page.getByPlaceholder('SSH user').fill('testuser');
+    await page.getByRole('button', { name: 'Add Device' }).click();
+
+    const qr = page.getByRole('img', { name: /\/b\/sc_enroll_[A-Za-z0-9_-]+$/ });
+    await expect(qr).toBeVisible({ timeout: 10000 });
+    const address = await qr.getAttribute('aria-label');
+
+    // The device: no session cookie. Opening the address spends nothing.
+    const device = await (await browser.newContext()).newPage();
+    await device.goto(address!);
+    await expect(device.getByRole('heading', { name: 'Bootstrap this device' })).toBeVisible();
+    await expect(device.getByText(/curl -s .*\/api\/v1\/bootstrap\/sc_enroll_[A-Za-z0-9_-]+ \| bash/)).toBeVisible();
+  });
+
   test('duplicate enrollment shows error', async ({ page }) => {
     const deviceId = `pw-dup-${Date.now()}`;
     await page.goto('/admin/devices');
