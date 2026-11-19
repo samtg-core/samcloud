@@ -3,8 +3,9 @@ import { NextRequest, NextResponse } from 'next/server';
 const REGISTRY_URL = process.env.REGISTRY_URL || 'http://localhost:7777';
 
 // Paths that don't require authentication
-// '/p/' is a pair code's page, opened on a device with no session (#1068).
-const PUBLIC_PATHS = ['/login', '/setup', '/pair', '/p/', '/invite', '/api/'];
+// '/p/' is a pair code's page, opened on a device with no session (#1068); '/b/' is an access target's
+// bootstrap page, the same for a target's QR (#1110).
+const PUBLIC_PATHS = ['/login', '/setup', '/pair', '/p/', '/b/', '/invite', '/api/'];
 
 function isPublicPath(pathname: string): boolean {
   return PUBLIC_PATHS.some((p) => pathname.startsWith(p));
