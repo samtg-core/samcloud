@@ -2,6 +2,11 @@
 
 What each release changed.
 
+## 2026-11-19 — A file attached on a ticket, task or doc is linked to it
+
+- A file attached through the console's "Attach files" landed in the uploader's default group and was never linked to the object it was attached on, so the object's readers got "File not found" for the embed (ticket 1103; files 2390 and 2784). The button posted the link to `/api/v1/files/{id}/links` from the browser. The generic `/api/v1` proxy forwards only a caller's `Authorization` header, and a browser sends a session cookie, so the registry refused every link and the button's best-effort catch hid it.
+- The link now goes through `/api/files/{id}/links`, which forwards the session's own registry token, as `/api/files/{id}/raw` does. The registry's existing check still applies: the linker must be able to read both the file and the target. If linking fails, the button keeps the embed and says the file isn't linked.
+
 ## 2026-11-19 — The bootstrap runs in Termux
 
 - A Quest 3 running Termux couldn't enrol as an access target (ticket 1110). Termux reports Linux, so the bootstrap took the Linux path and stopped at `mktemp /tmp/...`: Termux has no `/tmp`. Past that it would have needed sudo, apt-get, `service` and systemd, and Termux has none of them.
