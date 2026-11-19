@@ -47,13 +47,19 @@ export function AttachButton({
         onInsert(`${isImage ? '!' : ''}[${data.name}](/api/v1/files/${data.id}/raw)`);
 
         if (linkTo) {
-          // Best-effort: the embed is what the reader sees, the link is
-          // bookkeeping. Don't fail the attach if only this part fails.
-          fetch(`/api/v1/files/${data.id}/links`, {
+          // The link is what lets the object's readers open the file: an
+          // upload lands in the uploader's default group, which they may not
+          // share (#1103). Go through the session proxy — the generic
+          // /api/v1 proxy has no bearer from a browser, so every link through
+          // it was refused. Keep the embed if linking fails, but say so.
+          const linked = await fetch(`/api/files/${data.id}/links`, {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify(linkTo),
-          }).catch(() => {});
+          }).then(r => r.ok, () => false);
+          if (!linked) {
+            setError(`${data.name} is uploaded but not linked to this ${linkTo.target_type}, so its readers may get "File not found".`);
+          }
         }
       }
     } catch (e) {
