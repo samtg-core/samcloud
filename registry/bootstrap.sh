@@ -7,7 +7,8 @@ MARKER="__SAMCLOUD_BOOTSTRAP_MAIN__"
 
 # If we're being piped, save to file and re-exec
 if [[ ! -t 0 ]]; then
-    TMPSCRIPT=$(mktemp /tmp/samcloud-bootstrap-XXXXXX)
+    # Termux has no /tmp; it sets TMPDIR to its own (ticket 1110).
+    TMPSCRIPT=$(mktemp "${TMPDIR:-/tmp}/samcloud-bootstrap-XXXXXX")
     # Read the rest of stdin (the script from curl) into the temp file
     cat > "$TMPSCRIPT"
     chmod +x "$TMPSCRIPT"
@@ -78,7 +79,13 @@ detect_os() {
     case "$(uname -s)" in
         Darwin)                          echo "macos" ;;
         Linux)
-            grep -qi microsoft /proc/version 2>/dev/null && echo "wsl" || echo "linux" ;;
+            # Termux is an Android app with its own userland under $PREFIX: no root, no
+            # sudo, no systemd, packages from pkg, sshd on 8022 (ticket 1110).
+            if [[ -n "${TERMUX_VERSION:-}" || "${PREFIX:-}" == */com.termux/* ]]; then
+                echo "termux"
+            else
+                grep -qi microsoft /proc/version 2>/dev/null && echo "wsl" || echo "linux"
+            fi ;;
         MINGW*|MSYS*|CYGWIN*)           echo "gitbash" ;;
         *)                               echo "unknown" ;;
     esac
@@ -194,6 +201,35 @@ if [[ -n "$TUNNEL" && ("$OS" == "wsl" || "$OS" == "linux") ]]; then
     fi
 fi
 
+if [[ -n "$TUNNEL" && "$OS" == "termux" ]]; then
+    step "Prerequisites"
+
+    # Everything here runs as the Termux user, who owns $PREFIX; there is no root.
+    if ! command -v sshd >/dev/null 2>&1 || ! python3 -c 'import json' >/dev/null 2>&1; then
+        info "Installing openssh and python..."
+        if pkg install -y openssh python; then
+            ok "openssh and python installed"
+        else
+            fail "Could not install them. Run: pkg install openssh python"
+            info "Your enrollment token is still valid — re-run this command after installing."
+            exit 1
+        fi
+    else
+        ok "openssh and python present"
+    fi
+
+    ssh-keygen -A >/dev/null 2>&1 || true
+    if ! pgrep -x sshd >/dev/null 2>&1; then
+        sshd && ok "sshd started" || {
+            fail "Could not start sshd. Run: sshd"
+            info "Your enrollment token is still valid — re-run after starting sshd."
+            exit 1
+        }
+    else
+        ok "sshd running"
+    fi
+fi
+
 # Every answer from the registry (device token, gateway host key) and the tunnel's
 # key refresh are parsed with python3. On a Mac without the Command Line Tools,
 # /usr/bin/python3 is a stub that only offers to install them; every parse then
@@ -204,6 +240,8 @@ if ! python3 -c 'import json' >/dev/null 2>&1; then
     fail "python3 does not run on this machine; the bootstrap needs it to read the registry's answers."
     if [[ "$OS" == "macos" ]]; then
         info "  xcode-select --install"
+    elif [[ "$OS" == "termux" ]]; then
+        info "  pkg install python"
     else
         info "  sudo apt-get install -y python3"
     fi
@@ -222,7 +260,11 @@ fi
 # stores it as outbound_ssh_port, and used directly in the systemd unit's
 # `-R ${TUNNEL}:localhost:${LOCAL_SSH_PORT}` target.
 LOCAL_SSH_PORT=""
-if command -v sshd >/dev/null 2>&1; then
+if [[ "$OS" == "termux" ]]; then
+    # Termux's sshd is this user's own, so -T needs no sudo; it defaults to 8022.
+    LOCAL_SSH_PORT=$(sshd -T 2>/dev/null | awk '$1=="port"{print $2; exit}' || true)
+    [[ -z "$LOCAL_SSH_PORT" ]] && LOCAL_SSH_PORT=8022
+elif command -v sshd >/dev/null 2>&1; then
     LOCAL_SSH_PORT=$(sudo -n sshd -T 2>/dev/null | awk '$1=="port"{print $2; exit}' || true)
 fi
 if [[ -z "$LOCAL_SSH_PORT" && -r /etc/ssh/sshd_config ]]; then
@@ -244,6 +286,8 @@ if ! (exec 3<>"/dev/tcp/127.0.0.1/${LOCAL_SSH_PORT}") 2>/dev/null; then
     if [[ "$OS" == "macos" ]]; then
         info "  Turn on Remote Login: System Settings → General → Sharing → Remote Login"
         info "  (or: sudo systemsetup -setremotelogin on)"
+    elif [[ "$OS" == "termux" ]]; then
+        info "  Start sshd: sshd"
     else
         info "  Start sshd, listening on localhost: sudo service ssh start"
     fi
@@ -310,6 +354,11 @@ if [[ "$EXISTING" == true ]]; then
                 info "  sudo rm $unit"
             fi
         done
+    elif [[ "$OS" == "termux" ]]; then
+        pkill -f "${CFG_DIR}/tunnel.sh" 2>/dev/null && info "Stopped old tunnel runner"
+        for boot in "$HOME/.termux/boot/${UNIT_GLOB}"*; do
+            [[ -f "$boot" ]] && rm "$boot" && info "Removed old boot script"
+        done
     fi
 
     ok "Clean slate"
@@ -338,6 +387,7 @@ STARTUP="unknown"
 case "$OS" in
     macos)     STARTUP="launchd" ;;
     linux|wsl) STARTUP="systemd" ;;
+    termux)    STARTUP="termux-boot" ;;
 esac
 
 SSH_USER=$(whoami)
@@ -629,6 +679,26 @@ UNIT_EOF
             }
             ;;
 
+        termux)
+            # No systemd. The runner is started here under nohup, with a wake lock so
+            # Android does not suspend Termux with the screen off. The boot script starts
+            # it again after a reboot, through the Termux:Boot app (opened once); without
+            # that app, run the boot script by hand.
+            BOOT="$HOME/.termux/boot/${UNIT}"
+            mkdir -p "$HOME/.termux/boot"
+            cat > "$BOOT" <<BOOT_EOF
+#!${PREFIX}/bin/sh
+# samcloud tunnel for ${DEVICE} — written by bootstrap, do not edit.
+export PATH="${PREFIX}/bin:\$PATH"
+termux-wake-lock
+pgrep -x sshd >/dev/null || sshd
+pgrep -f "${RUNNER}" >/dev/null || nohup "${PREFIX}/bin/sh" "${RUNNER}" >>"${CFG_DIR}/tunnel.log" 2>&1 </dev/null &
+BOOT_EOF
+            chmod 700 "$BOOT"
+            ok "Boot script: ${BOOT/#$HOME/~}"
+            "${PREFIX}/bin/sh" "$BOOT" && ok "Tunnel started" || warn "Could not start it; run: ${BOOT/#$HOME/~}"
+            ;;
+
         *)
             warn "Unknown OS — configure tunnel manually:"
             info "ssh -N -R ${TUNNEL}:localhost:${LOCAL_SSH_PORT} ${SSH_HOST}"
@@ -668,6 +738,7 @@ if [[ -n "$TUNNEL" ]]; then
     case "$OS" in
         macos)     chk "Tunnel" "launchctl list 2>/dev/null | grep -q '${TUN_LABEL}'" ;;
         linux|wsl) chk "Tunnel" "systemctl is-active --quiet '${UNIT}' 2>/dev/null" ;;
+        termux)    chk "Tunnel" "pgrep -f '${RUNNER}' >/dev/null 2>&1" ;;
     esac
     chk "Gateway host key" "ssh-keygen -F '${GW_HOST_KEY_ALIAS}' -f '${CFG_DIR}/known_hosts' >/dev/null 2>&1"
 
@@ -696,6 +767,7 @@ if [[ -n "$TUNNEL" ]]; then
         case "$OS" in
             macos)     info "  Why: tail -20 /tmp/${LOGBASE}.err" ;;
             linux|wsl) info "  Why: journalctl -u ${UNIT} -n 20" ;;
+            termux)    info "  Why: tail -20 ${CFG_DIR}/tunnel.log" ;;
         esac
     fi
 fi

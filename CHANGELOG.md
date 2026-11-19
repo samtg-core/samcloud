@@ -2,6 +2,11 @@
 
 What each release changed.
 
+## 2026-11-19 — The bootstrap runs in Termux
+
+- A Quest 3 running Termux couldn't enrol as an access target (ticket 1110). Termux reports Linux, so the bootstrap took the Linux path and stopped at `mktemp /tmp/...`: Termux has no `/tmp`. Past that it would have needed sudo, apt-get, `service` and systemd, and Termux has none of them.
+- The bootstrap now detects Termux and runs as its user, with no root. It keeps its temp copy in `$TMPDIR`, installs `openssh` and `python` with `pkg`, starts `sshd` and reads its port (8022), and starts the tunnel from a Termux:Boot script with a wake lock. Other platforms are unchanged.
+
 ## 2026-11-19 — An access target's QR opens without a sign-in
 
 - `/b/<token>` was missing from the console's public paths, so the QR from the last release opened the login page on the device instead of the command (ticket 1110). It's public now, like `/p/<code>`.

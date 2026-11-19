@@ -107,7 +107,7 @@ An unknown `access_target` answers 400; `ssh` is read as `direct-ssh`. An existi
 The bootstrap is a script the registry renders for one device and one token:
 
 ```bash
-curl -s $PLANE/bootstrap/<token> | bash               # macOS, Linux, WSL
+curl -s $PLANE/bootstrap/<token> | bash               # macOS, Linux, WSL, Termux
 irm "$PLANE/bootstrap/<token>/ps1" | iex             # Windows (PowerShell)
 ```
 
@@ -123,7 +123,7 @@ Fetching the script does not spend the token. Activation does. The registry fill
 | activate | `POST /devices/activate` with the device's public key, its SSH user and sshd port, and the host key its own sshd presents. Answers the device token, the gateway's client key, and the gateway's host keys. |
 | gateway access | Installs the gateway's client key in the device's `authorized_keys`, so the gateway can SSH in. On WSL it also adds it to the Windows administrators' keys when it can. |
 | SSH config | Writes a `samcloud-gw` host block that checks the gateway strictly against the pinned key. |
-| tunnel | For a reverse-tunnel target, writes the tunnel runner and its launchd, systemd or scheduled-task job. |
+| tunnel | For a reverse-tunnel target, writes the tunnel runner and its launchd, systemd or scheduled-task job, or on Termux a boot script. |
 | device token | Stores the device token, mode 0600, in `~/.config/samcloud/device_token`. |
 | verify | Checks the key, token, config, tunnel job and gateway host key, then waits up to 30 seconds for the tunnel to hold its connection. |
 
@@ -132,12 +132,13 @@ Fetching the script does not spend the token. Activation does. The registry fill
 - **`python3` runs.** The bash bootstrap and its tunnel read the registry's answers with it. On a Mac without the Command Line Tools, `/usr/bin/python3` is only an installer stub: run `xcode-select --install`.
 - **sshd answers on localhost** at the detected port (`:22` on Windows). The gateway reaches the device there. On a Mac, turn on Remote Login (System Settings → General → Sharing).
 - **On Linux or WSL with a tunnel, sudo is available.** The bootstrap installs `openssh-server` and the systemd unit with it. Run as `curl … | bash` there is no terminal for a password prompt, so it stops and says so. Cache sudo first (`sudo -v`), then run it. An agent running the bootstrap for you needs the same.
+- **On Termux (Android, a Quest headset), nothing needs root.** Termux is Linux underneath but has no root, `sudo`, `/tmp` or systemd. The bootstrap installs `openssh` and `python` with `pkg`, starts `sshd` on its port (8022), and starts the tunnel from `~/.termux/boot/samcloud-tunnel-DEVICE` with a wake lock, so Android doesn't suspend it with the screen off. To start it again after a reboot, install the Termux:Boot app and open it once; without it, run that script by hand.
 
 **When it ends.** "Bootstrap complete" means the tunnel connected, not only that its job is registered. When it reports "partial", the line under "Tunnel connected" names the log to read. After it activates, the bootstrap writes the gateway's host key to `~/.config/samcloud/known_hosts` (`%USERPROFILE%\.config\samcloud\known_hosts` on Windows). The tunnel and the `samcloud-gw` alias check the gateway strictly against that file, so a missing key is reported as a failure. [SSH Gateway](SSH%20Gateway.md#host-key-trust) explains the two pins.
 
 **More than one plane.** With `SAMCLOUD_ENV` other than `prod`, everything the bootstrap installs is prefixed with the environment's name, so one machine can be enrolled in two planes. See [Configuration](Configuration.md).
 
-**How the scripts are made.** The registry serves two templates, `registry/bootstrap.sh` (macOS, Linux, WSL) and `registry/bootstrap.ps1` (Windows), and fills their `__PLACEHOLDER__` values per request. The device detects its own OS, privilege and sshd port; the registry decides what it owns: the environment, the transport and the ports. Run from Git Bash, the bash script points you to the PowerShell one.
+**How the scripts are made.** The registry serves two templates, `registry/bootstrap.sh` (macOS, Linux, WSL, Termux) and `registry/bootstrap.ps1` (Windows), and fills their `__PLACEHOLDER__` values per request. The device detects its own OS, privilege and sshd port; the registry decides what it owns: the environment, the transport and the ports. Run from Git Bash, the bash script points you to the PowerShell one.
 
 ### Re-bootstrapping
 
