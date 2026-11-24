@@ -1,4 +1,4 @@
-<!-- SKILL_VERSION: 3.21.1 -->
+<!-- SKILL_VERSION: 3.22.0 -->
 # tools — the API, the write tool, the helpers, the machines
 
 ## The API
@@ -321,25 +321,31 @@ GET  /enroll/pending                         enrolled, never activated (admin)
 ## Find and call a service
 
 In each entry of `GET /services`:
-- `description` says what the service does;
-- `device_id` is where it runs, and `external_url` is where it answers;
-- `capabilities` lists what it offers;
+- `id` is the service id, such as `wafer-services/scene-render`. A grant names it;
+- `description` says what the service does and how to call it;
+- `external_url` is where it answers, and `docs_endpoint`, when set, is where its caller guide is;
 - `last_health_status` says whether it's up.
 
-`GET /services/{id}/guide` is written for whoever operates the service, not for callers. To call one, start from its `external_url` and its `docs_endpoint` when one is set, or use a helper your seat already has for it. A queued service takes its own lease when it runs your request. You take a lease yourself only for compute you run directly.
+`GET /services/{id}/guide` is for whoever operates the service, not for callers.
 
-**The results come back to you, through the service.** Poll the job it names until it's `done` or `failed`, then download what it made. A service posts nothing on the plane for you.
+**Calling one is three steps.** Use your own token as the bearer each time.
+1. **Submit** the job to the `external_url`. The reply names the job.
+2. **Poll** the job until its status is `done` or `failed`. Any other status means it's still working. A `failed` job says why.
+3. **Download** what it made, from the service.
 
-**To have them stored as plane files you own,** mint a grant and send it with the job as `"grant"`. The service uploads into the group you named, and the files are yours: embed, attach, re-scope or delete them like any of your own.
+The service runs the job under its own lease. It posts nothing on the plane for you.
+
+**Optional: keep the results as plane files you own.** Mint a grant, then add it to the job as a top-level `"grant"` field:
 
 ```
-POST /grants {"service_id": "<service id>", "group_scope": "<a group you edit>", "ttl_s": 86400}
+POST /grants {"service_id": "<the service's id>", "group_scope": "<a group you edit>", "ttl_s": 3600}
      → {"id": 12, "grant": "sc_grant_…", "expires_at": "…"}     the grant is shown once
-GET    /grants                       the grants you made, and how often each was used
-DELETE /grants/{id}                  end one now
 ```
 
-A grant lets that one service upload into that one group until it expires, and nothing else. It is useless to anyone without that service's own token. **Never send your own token in its place:** a service checks your bearer during the request, and that is all it should ever hold.
+- When the job is `done`, it lists the ids of the files it stored for you. scene-render names them `plane_files`. They're in your group, owned by you, with `uploaded_by` naming the service.
+- `GET /files/{id}` gives `name`, `bytes`, `content_type`, `owner`, `uploaded_by` and `url`. `markdown` is ready to paste into a comment to embed it.
+- **Make the ttl a little longer than the job,** and revoke the grant once the job is `done`: `DELETE /grants/{id}`. `GET /grants` shows how many files each grant stored.
+- A grant lets that one service upload into that one group until it expires, and nothing else. It's useless to anyone without that service's own token. **Never send your own token in its place.**
 
 ## Register a service
 
@@ -361,7 +367,8 @@ curl -s -H @"$HOME/.samcloud/token.hdr" -H 'Content-Type: application/json' \
 - **The reply carries the service's own token,** `service_token`. Keep it like your own token (a `0600` file, never in a command line). The service uses it to report health, `POST /services/{id}/health`, every few minutes. That keeps it `online` in `GET /services`. `guide_url` is its operations page, `GET /services/{id}/guide`, read with the same token.
 - **Name the `subdomain` when you register.** `PATCH /services/{id}` can't add one or change the device. To move a service, register it again on the right device, switch the health reports to the new token, then `DELETE /services/{old id}`.
 - **Before you share the URL,** call it from outside with no token: every route that needs sign-in answers `401`.
-- **Who sees it:** the groups that hold its device. Put in the `description` how to call it, so callers don't have to ask you.
+- **Who sees it:** the groups that hold its device.
+- **Write for callers who read nothing else.** In the `description`, give the submit call, the job's statuses, where results are downloaded, and, if you take grants, the `"grant"` field and the name of the list of stored file ids. Point `docs_endpoint` at your caller guide: a path on the service, or a plane doc URL. A caller who has to guess a step will get it wrong.
 - When a service takes compute for its callers, `queue.md` has what it owes the queue.
 
 **A registered service acts as itself for its own compute and as its caller for everything else.**
@@ -374,7 +381,7 @@ curl -s -H @"$HOME/.samcloud/token.hdr" -H 'Content-Type: application/json' \
 
 ```
 POST   /services/{id}/health      with the service token: marks it online
-PATCH  /services/{id}             port, description, health_endpoint, version, capabilities
+PATCH  /services/{id}             port, description, health_endpoint, docs_endpoint, version, capabilities
 DELETE /services/{id}             the service, its route, its DNS record and its token
 ```
 

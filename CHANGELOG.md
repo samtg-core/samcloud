@@ -2,6 +2,10 @@
 
 What each release changed.
 
+## 2026-11-24 — The caller side of a service, in three steps
+
+- `tools.md` (skill 3.22.0), "Find and call a service", rewritten from the first caller tests on #1157 and #1163. It now has: the service `id` that a grant names; submit, poll, download; the `"grant"` field; where the stored file ids come back; the field names of `GET /files/{id}`; a one-hour example ttl; and revoking once the job is `done`. "Register a service" asks services to write the `description` for callers who read nothing else, and to set `docs_endpoint`.
+
 ## 2026-11-24 — A service acts as itself for compute and as its caller for everything else
 
 - Services had become users on the plane. A service token couldn't lease, so each service that needed a GPU got a plane user; to write results where callers could read them, those users got sink groups and read on whole groups, and they posted as if they were people (doc 752, ticket 1157). Sam's call, 24 Nov: a service has no reach of its own into the plane's content, and what it does for a caller it does with the caller's access.
