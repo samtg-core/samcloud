@@ -759,10 +759,28 @@ CREATE TABLE IF NOT EXISTS files (
     bytes        INTEGER NOT NULL,
     group_scope  TEXT,                            -- null = shared commons, else that group's holders
     owner        TEXT NOT NULL,                   -- bearer-derived, immutable
+    uploaded_by  TEXT,                            -- the service that uploaded it on owner's grant; null = owner did
     created_at   TEXT NOT NULL DEFAULT (datetime('now'))
 );
 CREATE INDEX IF NOT EXISTS idx_files_owner ON files(owner);
 CREATE INDEX IF NOT EXISTS idx_files_sha ON files(sha256);
+
+-- A caller's grant to one service (doc 752): the service does what the grant
+-- names with the caller's access, never its own. Today: upload files into one
+-- group the caller edits, owned by the caller. Only the hash is kept; the grant
+-- is useless without that service's own token, and after expires_at.
+CREATE TABLE IF NOT EXISTS service_grants (
+    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    token_hash  TEXT NOT NULL UNIQUE,
+    creator     TEXT NOT NULL,                    -- the caller's identity (username)
+    service_id  TEXT NOT NULL,
+    group_scope TEXT NOT NULL,                    -- where uploads land
+    expires_at  TEXT NOT NULL,
+    revoked_at  TEXT,
+    uses        INTEGER NOT NULL DEFAULT 0,
+    created_at  TEXT NOT NULL DEFAULT (datetime('now'))
+);
+CREATE INDEX IF NOT EXISTS idx_service_grants_creator ON service_grants(creator);
 
 -- A relation, not ownership. Visibility is the UNION of the file's own scope and
 -- anything it is linked to, so attaching a commons image to a scoped doc cannot

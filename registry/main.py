@@ -432,6 +432,16 @@ def _require_service_manager(auth: AuthContext, service_id: str) -> dict:
     raise HTTPException(403, f"You can read {service_id} but not change it")
 
 
+def _service_own_device(auth: Optional[AuthContext]) -> Optional[str]:
+    """The device a service token's service runs on (`<device>/<service>`), or
+    None for any other bearer. A service leases the compute it runs on as
+    itself (doc 752, step A): before this its token saw no device at all, so
+    every service that needed a GPU was given a plane user to lease with."""
+    if auth is not None and auth.token_type == "service" and "/" in (auth.owner_id or ""):
+        return auth.owner_id.split("/", 1)[0]
+    return None
+
+
 def _require_visible_resource(auth: AuthContext, resource_id: str, manage: bool = False) -> dict:
     """The resource row, hidden (404) when its device is outside the caller's
     scope; with `manage`, 403 for a reader who is not the device's manager.
@@ -440,7 +450,8 @@ def _require_visible_resource(auth: AuthContext, resource_id: str, manage: bool 
     if not res:
         raise HTTPException(404, f"Resource {resource_id} not found")
     visible = _visible_device_ids(auth)
-    if visible is not None and res.get("device_id") not in visible:
+    if (visible is not None and res.get("device_id") not in visible
+            and res.get("device_id") != _service_own_device(auth)):
         raise HTTPException(404, f"Resource {resource_id} not found")
     if manage and not auth.can_manage_device(res.get("device_id") or ""):
         raise HTTPException(403, f"You can read {resource_id} but not manage its device")
@@ -456,6 +467,9 @@ def _visible_resource_ids(auth: Optional[AuthContext]):
     visible_devices = _visible_device_ids(auth) if auth is not None else set()
     if visible_devices is None:
         return None  # admin
+    own = _service_own_device(auth)
+    if own:
+        visible_devices = set(visible_devices) | {own}
     return {r["id"] for r in db.query("SELECT id, device_id FROM resources")
             if r["device_id"] in visible_devices}
 
@@ -9562,7 +9576,7 @@ def api_index():
                 "delete": {"method": "DELETE", "path": "/api/v1/resources/{id}", "auth": "scoped"},
             },
             "leases": {
-                "request": {"method": "POST", "path": "/api/v1/resources/{id}/leases", "auth": "scoped", "description": "The resource's device must be in your scope (device:<id>, or a group that holds it). Outside scope is 404, not 403: the resource does not exist from there. A service token (service:self, service:heartbeat) sees no device, so it cannot lease. Request lease — 200 granted, 200 queued (status: queued, queue_position, wait_until), 409 refused. wait_s joins the queue instead of taking a 409 (held, exclusive-over-active, queue_ahead) and is how long you will wait; a shared request over the bytes queues without it, bounded by the registry default (3600 s). wait: true with no wait_s joins with no deadline (wait_until null): the row leaves the queue by promotion or by its own DELETE, never by the clock, and renew on it changes nothing. The queue is promoted in order (priority, then arrival) inside the transaction that frees the bytes; strict head of line, so a newcomer that would fit does not pass a waiter that does not (409 queue_ahead without wait_s). A request larger than the resource is 409 exceeds_capacity, never queued. memory_mb is optional/null or a strict non-negative integer; true, string numbers (such as \"100\"), fractions (such as 1.5) and negative values are 422. An unregistered service_id is 422 (omit it to lease as yourself). Other 409 detail.code values: invalid_existing_allocation (malformed active memory claim), invalid_resource_capacity (malformed declared capacity). A resource whose allocation_mode is exclusive grants an exclusive lease whether or not you ask for one, and at most one at a time"},
+                "request": {"method": "POST", "path": "/api/v1/resources/{id}/leases", "auth": "scoped", "description": "The resource's device must be in your scope (device:<id>, or a group that holds it). Outside scope is 404, not 403: the resource does not exist from there. A service token sees the resources of its own service's device and leases them as that service (service_id defaults to it; another is 403). Request lease — 200 granted, 200 queued (status: queued, queue_position, wait_until), 409 refused. wait_s joins the queue instead of taking a 409 (held, exclusive-over-active, queue_ahead) and is how long you will wait; a shared request over the bytes queues without it, bounded by the registry default (3600 s). wait: true with no wait_s joins with no deadline (wait_until null): the row leaves the queue by promotion or by its own DELETE, never by the clock, and renew on it changes nothing. The queue is promoted in order (priority, then arrival) inside the transaction that frees the bytes; strict head of line, so a newcomer that would fit does not pass a waiter that does not (409 queue_ahead without wait_s). A request larger than the resource is 409 exceeds_capacity, never queued. memory_mb is optional/null or a strict non-negative integer; true, string numbers (such as \"100\"), fractions (such as 1.5) and negative values are 422. An unregistered service_id is 422 (omit it to lease as yourself). Other 409 detail.code values: invalid_existing_allocation (malformed active memory claim), invalid_resource_capacity (malformed declared capacity). A resource whose allocation_mode is exclusive grants an exclusive lease whether or not you ask for one, and at most one at a time"},
                 "release": {"method": "DELETE", "path": "/api/v1/leases/{id}", "auth": "any", "description": "Holder or admin. Releasing commits together with the promotion of the waiters that now fit; the response names them (promoted) and each promotion publishes lease.granted with promoted:true. A queued request released by its requester leaves the queue as status cancelled On a hold resource the same call on an expired holder is the settlement (status: settled, event lease.settled) and the queue moves then. The release reaps first, inside its transaction: a waiter past its deadline is never resurrected by it."},
                 "get": {"method": "GET", "path": "/api/v1/leases/{id}", "auth": "scoped", "description": "One lease with its live queue_position while queued; hidden (404) outside the scope of its resource's device. status is one of active, queued, expired (expiry_reason ttl_expired: the holder stopped renewing, not proof its processes exited; wait_expired: a waiter ran out of wait), released (a holder gave it back), cancelled (a waiter left). Re-read after a lost reply: the row is the truth, and a repeated DELETE is idempotent"},
                 "wait": {"method": "GET", "path": "/api/v1/leases/{id}/wait?timeout_s=30", "auth": "scoped", "description": "Long-poll a queued lease: answers when it leaves the queue (active, expired, released) or after timeout_s (max 120) with the row as it is then and waiting:true. One request worker per waiter — for a few shell clients per host, not a fleet of pollers. The served helper `sc-lease acquire` wraps request + wait"},
@@ -12038,7 +12052,8 @@ def list_resources(device_id: str = None, type: str = None, provider: str = None
     # resources on visible devices; an unauthenticated caller sees nothing.
     visible = _visible_device_ids(auth) if auth is not None else set()
     if visible is not None:
-        resources = [r for r in resources if r["device_id"] in visible]
+        own = _service_own_device(auth)
+        resources = [r for r in resources if r["device_id"] in visible or r["device_id"] == own]
     result = [_normalise_resource(dict(r)) for r in resources]
 
     # Post-query filters
@@ -12544,6 +12559,13 @@ def continue_lease_group(group_id: str, req: LeaseGroupContinuation,
 def request_lease(resource_id: str, req: LeaseRequest, auth: AuthContext = Depends(get_auth)):
     """Reserve declared capacity atomically; queueing does not start execution."""
     _require_visible_resource(auth, resource_id)
+    if _service_own_device(auth):
+        # A service token leases as its own service and for no other (doc 752).
+        if req.service_id is None:
+            req = req.model_copy(update={"service_id": auth.owner_id})
+        elif req.service_id != auth.owner_id:
+            raise HTTPException(403, f"A service token leases as its own service ({auth.owner_id}), "
+                                     f"not as {req.service_id}")
     body, metadata = reserve_lease(
         db, resource_id, req, auth.owner_id,
         default_ttl=EXCLUSIVE_DEFAULT_TTL_S,
@@ -13560,11 +13582,110 @@ def _file_view(f: dict) -> dict:
     return f
 
 
+# --- Service grants (doc 752) ---
+#
+# A service has no reach of its own into the plane's content. What it does for
+# a caller it does with the caller's access, and the caller hands that over as
+# a grant: minted with the caller's own bearer, naming one service, one group
+# the caller edits, and an expiry. The caller's bearer itself is never handed
+# over -- that would be everything the caller can do, for as long as the token
+# lives. A grant alone does nothing: only that service's own token can use it.
+
+GRANT_TTL_DEFAULT_S = 86400
+GRANT_TTL_MAX_S = 7 * 86400
+
+
+class GrantCreate(StrictModel):
+    service_id: str
+    group_scope: Optional[str] = None       # default: the caller's default group
+    ttl_s: int = Field(default=GRANT_TTL_DEFAULT_S, strict=True, ge=60, le=GRANT_TTL_MAX_S)
+
+
+def _grant_view(g: dict) -> dict:
+    return {k: g[k] for k in ("id", "creator", "service_id", "group_scope", "expires_at",
+                              "revoked_at", "uses", "created_at")}
+
+
+@app.post("/api/v1/grants")
+def create_grant(req: GrantCreate, auth: AuthContext = Depends(get_auth)):
+    """A caller lets one service upload files into one group it edits, owned by the caller."""
+    if not (auth.is_admin() or (auth.token_type != "service"
+            and ((auth.owner_id or "").startswith("user:") or auth.token_type == "agent"))):
+        raise HTTPException(403, "A grant is a caller's: a person or an agent mints it with its own token")
+    _require_visible_service(auth, req.service_id)
+    group_scope = _resolve_group(auth, req.group_scope, "file")
+    grant = "sc_grant_" + secrets.token_urlsafe(32)
+    expires = (datetime.now(timezone.utc) + timedelta(seconds=req.ttl_s)).isoformat()
+    gid = db.execute(
+        "INSERT INTO service_grants (token_hash, creator, service_id, group_scope, expires_at) "
+        "VALUES (?, ?, ?, ?, ?)",
+        (enrollment._hash_token(grant), auth.identity(), req.service_id, group_scope, expires))
+    db.audit(auth.identity(), "grant.created", f"grant:{gid}",
+             {"service_id": req.service_id, "group_scope": group_scope, "expires_at": expires})
+    row = db.query_one("SELECT * FROM service_grants WHERE id = ?", (gid,))
+    return {**_grant_view(row), "grant": grant}
+
+
+@app.get("/api/v1/grants")
+def list_grants(auth: AuthContext = Depends(get_auth)):
+    """The grants you made (admin: all), newest first. The grant itself is never shown again."""
+    if auth.is_admin():
+        rows = db.query("SELECT * FROM service_grants ORDER BY id DESC LIMIT 200")
+    else:
+        rows = db.query("SELECT * FROM service_grants WHERE creator = ? ORDER BY id DESC LIMIT 200",
+                        (auth.identity(),))
+    return {"grants": [_grant_view(r) for r in rows]}
+
+
+@app.delete("/api/v1/grants/{grant_id}")
+def revoke_grant(grant_id: int, auth: AuthContext = Depends(get_auth)):
+    """End a grant now. Its creator or the admin."""
+    g = db.query_one("SELECT * FROM service_grants WHERE id = ?", (grant_id,))
+    if not g or (g["creator"] != auth.identity() and not auth.is_admin()):
+        raise HTTPException(404, f"Grant {grant_id} not found")
+    if not g["revoked_at"]:
+        db.execute("UPDATE service_grants SET revoked_at = ? WHERE id = ?",
+                   (datetime.now(timezone.utc).isoformat(), grant_id))
+        db.audit(auth.identity(), "grant.revoked", f"grant:{grant_id}", {})
+    return _grant_view(db.query_one("SELECT * FROM service_grants WHERE id = ?", (grant_id,)))
+
+
+def _use_upload_grant(auth: AuthContext, grant: str, group_scope: Optional[str]) -> dict:
+    """The grant row a service may upload with now, or a refusal. Checked before
+    a byte is read: the bearer must be the service the grant names, the grant
+    live, the group the grant's, and its creator still an editor there."""
+    if auth.token_type != "service":
+        raise HTTPException(403, "A grant is used by the service it names, with that service's own token")
+    g = db.query_one("SELECT * FROM service_grants WHERE token_hash = ?",
+                     (enrollment._hash_token(grant),))
+    if not g or g["service_id"] != auth.owner_id:
+        raise HTTPException(403, "This grant is not for this service")
+    if g["revoked_at"]:
+        raise HTTPException(403, "This grant was revoked")
+    if datetime.fromisoformat(g["expires_at"]) <= datetime.now(timezone.utc):
+        raise HTTPException(403, "This grant has expired; the caller mints a new one")
+    if group_scope and group_scope != g["group_scope"]:
+        raise HTTPException(422, f"This grant uploads into '{g['group_scope']}' only; "
+                                 f"leave group_scope out or name that group")
+    roles = groupscope.memberships_of_username(g["creator"])
+    if roles is not None and groupscope.rank(roles.get(g["group_scope"])) < groupscope.ROLE_RANK["editor"]:
+        raise HTTPException(403, f"{g['creator']} no longer edits '{g['group_scope']}', so the grant "
+                                 f"cannot be used")
+    return g
+
+
 @app.post("/api/v1/files")
 async def upload_file(file: UploadFile = File(...), group_scope: str = Form(None),
-                      auth: AuthContext = Depends(get_auth)):
-    """Upload a file. Owner is bearer-derived; the stored name is metadata only."""
-    group_scope = _resolve_file_scope(auth, group_scope)
+                      grant: str = Form(None), auth: AuthContext = Depends(get_auth)):
+    """Upload a file. Owner is bearer-derived; the stored name is metadata only.
+    With `grant`, a service uploads for the caller who minted it: into the
+    grant's group, owned by that caller, and `uploaded_by` names the service."""
+    used_grant = None
+    if grant:
+        used_grant = _use_upload_grant(auth, grant, group_scope)
+        group_scope = used_grant["group_scope"]
+    else:
+        group_scope = _resolve_file_scope(auth, group_scope)
     ctype = (file.content_type or "application/octet-stream").split(";")[0].strip()
     if not _file_type_ok(ctype):
         raise HTTPException(415, f"content_type '{ctype}' not allowed")
@@ -13622,10 +13743,14 @@ async def upload_file(file: UploadFile = File(...), group_scope: str = Form(None
             writer.abort()
 
     name = os.path.basename(file.filename or sha)[:200]
+    owner = used_grant["creator"] if used_grant else auth.identity()
+    uploaded_by = auth.owner_id if used_grant else None
     fid = db.execute(
-        "INSERT INTO files (sha256, name, content_type, bytes, group_scope, owner) "
-        "VALUES (?, ?, ?, ?, ?, ?)",
-        (sha, name, ctype, total, group_scope, auth.identity()))
+        "INSERT INTO files (sha256, name, content_type, bytes, group_scope, owner, uploaded_by) "
+        "VALUES (?, ?, ?, ?, ?, ?, ?)",
+        (sha, name, ctype, total, group_scope, owner, uploaded_by))
+    if used_grant:
+        db.execute("UPDATE service_grants SET uses = uses + 1 WHERE id = ?", (used_grant["id"],))
     row = db.query_one("SELECT * FROM files WHERE id = ?", (fid,))
     event_bus.emit("file.uploaded", f"file:{fid}",
                    {"id": fid, "name": name, "bytes": total, "content_type": ctype},
