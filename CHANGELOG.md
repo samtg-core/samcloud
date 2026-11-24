@@ -2,6 +2,11 @@
 
 What each release changed.
 
+## 2026-11-24 — Lists and thread reads read the caller once
+
+- The plane was slow for everyone on 24 Nov (ticket 1146). Ticket lists took up to 88 s for a seat, and even single reads were slow. A list, a search or a thread read that checked each row re-read the caller's username and group memberships for every row. In tests that was 1,546 queries for one page of tickets as a seat, 2,155 for one search, and 189 for one thread read. The rails read threads about 3.5 times a second, which kept the registry near six cores busy.
+- A GET or HEAD request now reads the caller's name and groups once and keeps them for that request. A request that changes something never keeps them, and each request starts fresh, so a membership change is seen on the next request. The same ticket page takes 9 queries, the search 13, and the thread read 105, one per member row.
+
 ## 2026-11-24 — google-broker records what Google granted at consent
 
 - A Workspace consent screen has a box per scope. When Drive was left unticked, Google granted only email, but the broker recorded the scopes the consent link asked for (ticket 1154). So `/mint` let a full-URL `drive.file` through to Google (a bare `invalid_scope`), or handed back a token without Drive that Drive then refused on the first upload.

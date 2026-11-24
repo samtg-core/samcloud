@@ -218,6 +218,9 @@ class AuthContext:
         self.token_type = token_type  # 'device', 'service', 'agent', 'admin'
         self.owner_id = owner_id
         self.scopes = scopes
+        # A GET or HEAD changes no group membership, so its caller's groups can
+        # be read once for the whole request (scope.memberships) — #1146.
+        self.read_only = False
 
     def has_scope(self, scope: str) -> bool:
         return "*" in self.scopes or scope in self.scopes
@@ -313,12 +316,17 @@ class AuthContext:
         Used by POST /tickets and POST /comments to derive source/author
         from the bearer rather than trusting body-supplied identity.
         """
+        if self.read_only and getattr(self, "_identity_memo", None):
+            return self._identity_memo          # one lookup per read-only request (#1146)
+        name = self.owner_id
         if self.owner_id.startswith("user:"):
             row = db.query_one("SELECT username FROM users WHERE id = ?",
                                (int(self.owner_id.split(":")[1]),))
             if row and row.get("username"):
-                return row["username"]
-        return self.owner_id
+                name = row["username"]
+        if self.read_only:
+            self._identity_memo = name
+        return name
 
 
 def _device_ids_for_scopes(scopes: list[str]):
@@ -469,7 +477,7 @@ def _get_group_role(auth: AuthContext, group_id: str) -> str:
 ROLE_HIERARCHY = groupscope.ROLE_RANK
 
 
-def get_auth(authorization: Optional[str] = Header(None)) -> AuthContext:
+def get_auth(authorization: Optional[str] = Header(None), request: Request = None) -> AuthContext:
     """Extract and validate auth token. Returns AuthContext or raises 401."""
     if not authorization:
         raise HTTPException(401, "Missing Authorization header. Include: Authorization: Bearer <token>. Get a token via POST /api/v1/auth/login with username and password.")
@@ -516,11 +524,13 @@ def get_auth(authorization: Optional[str] = Header(None)) -> AuthContext:
                 scopes.append(scope)
                 existing.add(scope)
 
-    return AuthContext(
+    ctx = AuthContext(
         token_type=token_record["type"],
         owner_id=owner_id,
         scopes=scopes,
     )
+    ctx.read_only = request is not None and request.method in ("GET", "HEAD")
+    return ctx
 
 
 def get_auth_optional(authorization: Optional[str] = Header(None)) -> Optional[AuthContext]:
