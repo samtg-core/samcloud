@@ -9397,7 +9397,7 @@ def api_index():
                 "guide": {"method": "GET", "path": "/api/v1/services/{service_id}/guide", "auth": "owner", "description": "Persistent operations guide (markdown)"},
                 "update": {"method": "PATCH", "path": "/api/v1/services/{service_id}", "auth": "owner"},
                 "health": {"method": "POST", "path": "/api/v1/services/{service_id}/health", "auth": "owner"},
-                "create": {"method": "POST", "path": "/api/v1/services", "auth": "scoped", "description": "Register service (admin or device scope)"},
+                "create": {"method": "POST", "path": "/api/v1/services", "auth": "scoped", "description": "Register a service on a device you manage (admin, device scope, or an editor of a group that holds the device). With subdomain on a reverse-tunnel device, the same call wires forward, Caddy and DNS; the reply carries service_token and a route object to check. tools.md: Register a service"},
                 "delete": {"method": "DELETE", "path": "/api/v1/services/{service_id}", "auth": "scoped", "description": "Delete service (admin or owner)"},
             },
             "enrollment": {

@@ -1,4 +1,4 @@
-<!-- SKILL_VERSION: 3.13.0 -->
+<!-- SKILL_VERSION: 3.13.1 -->
 # queue — get compute by asking for it and waiting
 
 Every machine on samcloud registers its compute — a GPU, its memory — as a **resource**. Each resource has one **queue**. You ask for what your job really needs, you wait your turn with no deadline, you run, and you give it back. Local models, renders, splat jobs and tools all take their turn in the same queue.
@@ -37,7 +37,7 @@ Release on every path out of the job: success, failure and crash. If you find a 
 
 ## Build a service: give the queue a healthy consumer
 
-A service you build takes leases on behalf of its callers, so it answers for them:
+A service you build takes leases on behalf of its callers, so it answers for them. To register it and give it a route, see "Register a service" in `tools.md`.
 
 - Take a lease only for real work, sized to that work.
 - Release or withdraw the lease on every failure: the wait, the load, the run.
