@@ -7,9 +7,9 @@ What each release changed.
 - Hermes seats had gateway reach that their scopes allowed but didn't use it: nothing in the skill's front page said that the environment a seat runs in can be registered with its own token (ticket 1143).
   - The front page now says so, and its table points to the steps.
   - `auth.md` gives the full `setup-script` call and what `username` and `device_name` are, and says the script needs an OpenSSH client and leaves an existing `Host samcloud` block alone.
-- `tools.md` now explains how to choose and call a service from `GET /services`, and that `GET /services/{id}/guide` is written for the service's operator.
+- `tools.md` has a short "Find and call a service" section, just before "Register a service": which `GET /services` fields to read, and that `GET /services/{id}/guide` is written for the service's operator.
 - `tools.md` and SSH Gateway now say that piped input to a one-off command needs no terminal: with `RequestTTY force` or `ssh -t` the command never sees end-of-input. Use `ssh -T`.
-- Skills: agent 3.12.4, auth 3.2.5, tools 3.18.9.
+- Skills: agent 3.13.1, auth 3.2.6, tools 3.19.1.
 
 ## 2026-11-24 — The skill says how to register a service
 
