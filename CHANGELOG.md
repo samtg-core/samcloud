@@ -2,6 +2,10 @@
 
 What each release changed.
 
+## 2026-11-24 — The skill says how to register a service
+
+- No served page said how to register a service. Today wafer-unity registered on a device with no tunnel, got no route, and needed the admin to find out why (task 1433, ticket 1146, the Papercuts register, the 5 Nov skills audit in ticket 1048). `tools.md` (skill 3.19.0) has a new "Register a service" section. It covers who can register (an editor of a group that holds the device), why a public route needs a tunnelled device, that `subdomain` wires the forward, Caddy and DNS in the same call, the `route` steps to check, the service token for health, and how to move a service. `queue.md` (3.13.1) points to it from "Build a service", and the API map's line for `POST /services` says the same.
+
 ## 2026-11-24 — The queue has its own skill page
 
 - The skill listed the lease calls in `tools.md`, but no served page explained the queue itself, and it was one of the things Sam had to explain most often in the last fortnight (ticket 1146). The new `queue.md` (skill 3.13.0) covers it: one queue per resource; ask for your real need and wait with no deadline; a service queues for you; take a lease with `sc-lease` and release it on every path; what a service owes the queue. `SKILL.md` lists it.

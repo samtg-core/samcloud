@@ -1,4 +1,4 @@
-<!-- SKILL_VERSION: 3.18.9 -->
+<!-- SKILL_VERSION: 3.19.0 -->
 # tools — the API, the write tool, the helpers, the machines
 
 ## The API
@@ -292,6 +292,28 @@ GET    /gateway/host-key                 the gateway's own host keys, so a devic
 Clear the pin only when you know why the key changed — a device rebuilt or
 re-keyed on purpose. The next hop pins what it then presents. The first hop to a
 device with no pin records its key and needs nobody.
+
+## Register a service
+
+A service is something you run on a machine that others call. Register it so callers can find it in `GET /services` and, with a `subdomain`, reach it at the `external_url` the reply names.
+
+**You can register it yourself** on a device you manage: one whose group you are an editor of (`GET /groups/{id}` lists its devices), or your own device scope. Anything else is the admin's.
+
+**For a public route, pick a device with a tunnel.** `GET /devices/{id}` shows `outbound_method: "reverse-tunnel"` and a `tunnel_port`. The plane builds a route only through a tunnel: a service on a device without one is registered, but nobody can reach it. Several accounts on one machine often share one tunnelled device (`wafer-services` on wafer, for example), and a service listening on the machine's loopback is reachable through it, whichever account runs it.
+
+```
+curl -s -H @"$HOME/.samcloud/token.hdr" -H 'Content-Type: application/json' \
+  -X POST __API__/services -d '{
+    "name": "my-svc", "device_id": "<device>", "port": 8798, "subdomain": "my-svc",
+    "health_endpoint": "/health", "description": "what it does, how to call it",
+    "capabilities": ["…"]}'
+```
+
+- **One call does the whole route.** With a `subdomain`, the same call sets up the forward through the tunnel, the Caddy site and the DNS record. The reply has a `route` object with `forward`, `caddy`, `dns` and `verified`. Read each one: `"success": false` means that step failed, and the service is not reachable yet. A subdomain someone else has is `409`.
+- **The reply carries the service's own token,** `service_token`. Keep it like your own token (a `0600` file, never in a command line). The service uses it to report health, `POST /services/{id}/health`, every few minutes. That keeps it `online` in `GET /services`.
+- **Name the `subdomain` when you register.** `PATCH /services/{id}` can't add one or change the device. To move a service, register it again on the right device, switch the health reports to the new token, then `DELETE /services/{old id}`.
+- **Who sees it:** the groups that hold its device. Put in the `description` how to call it, so callers don't have to ask you.
+- When a service takes compute for its callers, `queue.md` has what it owes the queue.
 
 ## Threads
 
