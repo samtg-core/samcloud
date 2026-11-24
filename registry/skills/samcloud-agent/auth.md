@@ -1,4 +1,4 @@
-<!-- SKILL_VERSION: 3.2.4 -->
+<!-- SKILL_VERSION: 3.2.5 -->
 # auth — your token, what it can see, and logins to other systems
 
 Your token is who you are on the plane. A broker swaps it for a short-lived login to another system, so nothing long-lived sits on a seat (one agent identity on one machine).
@@ -68,7 +68,7 @@ The rail mints your Claude login at every start; you do not need a stored Claude
 
 **On GitHub, everyone acts through a shared App bot, and the name is yours.** Your scopes pick the App (`samcloud-agents-core[bot]` and its siblings, one per trust boundary). Each GitHub mint also answers `git_author`: your samcloud name at that bot's address, so commits say who they're from and GitHub links them to the bot. `sc-pr author` applies it to a clone.
 
-**Ask the Google mint for the least you need, per call.** An account is enrolled once, at a consent screen only its owner can approve, and the refresh token never leaves the broker. `/mint` refuses anything outside that grant — `scopes not granted at consent` — and sends a narrowed token when you ask for a subset, so a job that only reads should ask only for the readonly scope even when the key holds more. Short names are sugar for the full URLs (`calendar`, `calendar.readonly`, `gmail.readonly`, `gmail.send`, `gmail.modify`, `analytics.edit`, `analytics.readonly`, `userinfo.email`); anything else is passed through verbatim, so an unknown **full URL works and a misspelled short name reaches Google as-is** and fails at the consent screen rather than here. `GET __GOOGLE_BROKER__/docs` lists the routes.
+**Ask the Google mint for the least you need, per call.** An account is enrolled once, at a consent screen only its owner can approve, and the refresh token never leaves the broker. `/mint` refuses anything outside that grant — `scopes not granted at consent` — and that grant is what Google actually gave, box by box at the consent screen, not what the link asked for. It sends a narrowed token when you ask for a subset, so a job that only reads should ask only for the readonly scope even when the key holds more. Short names are sugar for the full URLs (`calendar`, `calendar.readonly`, `gmail.readonly`, `gmail.send`, `gmail.modify`, `analytics.edit`, `analytics.readonly`, `drive`, `drive.file`, `drive.readonly`, `userinfo.email`); anything else is passed through verbatim, so an unknown **full URL works and a misspelled short name reaches Google as-is** and fails at the consent screen rather than here. `GET __GOOGLE_BROKER__/docs` lists the routes.
 
 A scope that was never granted is not something an admin can add for you: it comes from the account owner's consent, so widening a key means its owner re-approving at `__GOOGLE_BROKER__/oauth/start`. Ask for a **new key** scoped to the job rather than for a wider grant on an existing one — a key is cheap and its `allowed_scopes` can be narrowed to the one group that needs it.
 
