@@ -1,4 +1,4 @@
-<!-- SKILL_VERSION: 3.21.0 -->
+<!-- SKILL_VERSION: 3.21.1 -->
 # tools — the API, the write tool, the helpers, the machines
 
 ## The API
@@ -366,6 +366,7 @@ curl -s -H @"$HOME/.samcloud/token.hdr" -H 'Content-Type: application/json' \
 
 **A registered service acts as itself for its own compute and as its caller for everything else.**
 - **Compute:** it leases with its own service token, on the device it runs on (`POST /resources/{id}/leases`). The lease names the service as its holder. It can't lease another device's compute, or lease as another service.
+- **Through compute-jobs:** set `"service": "<service id>"` in the service's compute-jobs config, beside `expected_principal`, and use a compute-jobs with the service-actor fix (`samtg-projects/compute-jobs` PR #4). Without `service`, compute-jobs saves its intent with no service, the plane names the service as holder, and compute-jobs refuses its own lease and can't release it (`service attribution does not match saved intent`). Release such an orphan with `DELETE /leases/{id}` and the service token.
 - **No reach of its own into the plane's content:** it posts no comments and links nothing.
 - **Reads for a caller:** the caller's bearer, checked with `GET /auth/verify`, used during that request and never stored.
 - **Results as plane files:** `POST /files` with the service token, `-F grant=<the caller's grant>` and no `group_scope`. The file lands in the grant's group, owned by the caller, with `uploaded_by` naming the service. A grant that has expired or been revoked, or whose caller no longer edits the group, is refused with `403`: report that in the job.
