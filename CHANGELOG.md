@@ -2,6 +2,12 @@
 
 What each release changed.
 
+## 2026-11-24 — An upload answers with its embed, /files is in the index, and /tasks pages
+
+- A seat that uploaded a file had to build its markdown embed by hand, and seats posted host paths instead, which nobody else can open. That cost Sam about 13 round trips in a fortnight (ticket 1146). Every file record now carries `markdown`: `![name](/api/v1/files/{id}/raw)` for an image and `[name](…)` for anything else, the same form the console's Attach button writes. The tools skill page (3.18.9) says to paste it.
+- `GET /api/v1/` didn't list `/files`. It does now, with upload, list, read, raw, re-scope, delete, link and unlink.
+- `GET /tasks` stopped at the 500 lowest ids and ignored `offset`. It now pages with `limit` (up to 500) and `offset` over the tasks you can see, and answers with `total` and `next_offset`.
+
 ## 2026-11-24 — Lists and thread reads read the caller once
 
 - The plane was slow for everyone on 24 Nov (ticket 1146). Ticket lists took up to 88 s for a seat, and even single reads were slow. A list, a search or a thread read that checked each row re-read the caller's username and group memberships for every row. In tests that was 1,546 queries for one page of tickets as a seat, 2,155 for one search, and 189 for one thread read. The rails read threads about 3.5 times a second, which kept the registry near six cores busy.
