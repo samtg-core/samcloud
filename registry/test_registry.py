@@ -3269,6 +3269,41 @@ class TestDocTree:
             assert got["path"] == [{"id": hidden}]
             assert got["path_text"] == f"#{hidden} / Seat doc"
 
+    def test_the_tree_reads_the_callers_groups_once(self, client):
+        """A non-admin read used to re-read the caller's memberships once per
+        doc in the table, a few thousand queries per read in production."""
+        import db as dbmod
+        app = _get_app()
+        with TestClient(app) as raw:
+            _create_group(client, "W", "W")
+            token, uid = _invite_and_activate(client, raw, "wide-seat", ["group:W"])
+            client.patch(f"/api/v1/groups/W/members/{uid}", json={"role": "editor"})
+            seat = AuthedClient(raw, token)
+            top = seat.post("/api/v1/docs", json={"title": "Wide top", "body": "x",
+                                                  "group_scope": "W"}).json()["doc_id"]
+            for i in range(300):
+                dbmod.execute("INSERT INTO docs (slug, title, kind, status, group_scope, source, owner, parent_doc_id, current_rev) "
+                              "VALUES (?, ?, 'doc', 'active', 'W', 'admin', 'admin', ?, 1)",
+                              (f"wide-{i}", f"Wide {i}", top))
+            leaf = seat.post("/api/v1/docs", json={"title": "Wide leaf", "body": "y", "group_scope": "W",
+                                                   "parent_doc_id": top}).json()["doc_id"]
+            calls = {"n": 0}
+            real_q, real_q1 = dbmod.query, dbmod.query_one
+            def q(*a, **k):
+                calls["n"] += 1; return real_q(*a, **k)
+            def q1(*a, **k):
+                calls["n"] += 1; return real_q1(*a, **k)
+            with patch.object(dbmod, "query", q), patch.object(dbmod, "query_one", q1):
+                got = seat.get(f"/api/v1/docs/{leaf}").json()
+                read_calls = calls["n"]; calls["n"] = 0
+                listed = seat.get(f"/api/v1/docs?parent={top}&limit=5").json()
+                list_calls = calls["n"]
+            assert got["path_text"] == "Wide top / Wide leaf"
+            assert got["siblings"]["previous"]["title"] == "Wide 299"
+            assert listed["total"] == 301
+            assert read_calls < 60, read_calls
+            assert list_calls < 60, list_calls
+
 
 class TestReplayGuard:
     """Comment replay tripwire (v0.7.71, the #363 fossil: 4 posts, 3 identities)."""

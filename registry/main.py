@@ -4793,7 +4793,20 @@ class _DocTree:
     def __init__(self, auth: AuthContext):
         self.rows = {d["id"]: d for d in db.query(
             "SELECT id, slug, title, parent_doc_id, source, owner, group_scope FROM docs")}
-        self.visible = {i for i, d in self.rows.items() if _can_see_doc(auth, d)}
+        # The caller's groups are read once. `_can_see_doc` per row re-reads
+        # them every call: a few thousand queries per read on the live tree.
+        # Same rule as groupscope.object_readable: admin, author or owner, or
+        # a member of the doc's group.
+        groups = groupscope.readable_groups(auth)
+        me = {auth.owner_id, auth.identity()} - {None, ""}
+
+        def readable(d):
+            if groups is None:
+                return True
+            if (d.get("source") in me) or (d.get("owner") in me):
+                return True
+            return bool(d.get("group_scope")) and d["group_scope"] in groups
+        self.visible = {i for i, d in self.rows.items() if readable(d)}
         self.children: dict = {}
         for i in sorted(self.visible):
             p = self.rows[i]["parent_doc_id"]
@@ -4884,8 +4897,8 @@ def list_docs(kind: str = None, status: str = None, group_scope: str = None,
     where = " WHERE " + " AND ".join(clauses) if clauses else ""
     docs = db.query(f"SELECT * FROM docs{where} ORDER BY updated_at DESC, id DESC",
                     tuple(params))
-    visible = [d for d in docs if _can_see_doc(auth, d)]
     tree = _DocTree(auth)
+    visible = [d for d in docs if d["id"] in tree.visible]
     col, desc = _DOC_SORTS[sort]
     if order:
         desc = order == "desc"
