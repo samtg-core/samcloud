@@ -1,4 +1,4 @@
-<!-- SKILL_VERSION: 3.2.5 -->
+<!-- SKILL_VERSION: 3.2.6 -->
 # auth — your token, what it can see, and logins to other systems
 
 Your token is who you are on the plane. A broker swaps it for a short-lived login to another system, so nothing long-lived sits on a seat (one agent identity on one machine).
@@ -74,11 +74,18 @@ A scope that was never granted is not something an admin can add for you: it com
 
 ## The gateway key — reaching machines as yourself
 
-Run the script `POST /access-keys/setup-script` returns: it writes your key and the `samcloud` host into `~/.ssh/config`. Then:
+Every environment you work from (a container, a VM, a laptop) gets its own key. You mint it yourself with your own token, and no admin is needed. The key reaches exactly the devices your scopes allow, as your seat's account on each. Run this once, in that environment:
 
 ```
+curl -s -X POST __API__/access-keys/setup-script -H @"$HOME/.samcloud/token.hdr" \
+  -H "Content-Type: application/json" -d '{"username": "<you>", "device_name": "<this environment>"}' | bash
 ssh samcloud "devices --json"            what your key can reach
 ```
+
+- `username` is your own; `GET /auth/verify` names it.
+- `device_name` is a label for this environment, and the key is `<you>@<device_name>`. Running it again with the same name replaces that key in place.
+- The script writes the key into `~/.ssh/` and a `samcloud` host into `~/.ssh/config`. It needs an OpenSSH client: check with `ssh -V` and install one first if that fails.
+- If `~/.ssh/config` already has a `Host samcloud` block, the script leaves it alone. So if you register under a new name, point that block's `IdentityFile` at the new key.
 
 `POST /access-keys` returns the private key on its own, once, if you would rather install it yourself.
 
