@@ -2,6 +2,13 @@
 
 What each release changed.
 
+## 2026-11-24 — google-broker records what Google granted at consent
+
+- A Workspace consent screen has a box per scope. When Drive was left unticked, Google granted only email, but the broker recorded the scopes the consent link asked for (ticket 1154). So `/mint` let a full-URL `drive.file` through to Google (a bare `invalid_scope`), or handed back a token without Drive that Drive then refused on the first upload.
+- The callback now records the scopes in Google's token response. Its page says which were dropped and to open the link again; the mint log carries `requested_scopes` and `dropped_scopes`.
+- `/mint` refuses a token Google returns narrower than asked for, and Google's `invalid_scope` on refresh, as `scopes not granted at consent`. That covers accounts enrolled before this change.
+- New short names: `drive`, `drive.file`, `drive.readonly`. Tests in `google-broker/test_granted_scopes.py`.
+
 ## 2026-11-24 — Doc reads answer quickly again
 
 - Since the docs tree release, a doc read, the docs list and doc search could take seconds or more for a caller who isn't admin, and they held workers under concurrent reads (ticket 1146). Working out the tree checked each doc's visibility on its own, and each check re-read the caller's group memberships: 2,124 queries for one read over 302 docs in the test. The caller's groups are now read once per request, under the same rule (admin, author or owner, or a member of the doc's group). The same read takes 25 queries, and a list page takes 15.

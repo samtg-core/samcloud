@@ -19,6 +19,7 @@ any browser including a phone — no localhost loopback needed.
 Run: uvicorn main:app --host 0.0.0.0 --port 7783
 """
 
+import html
 import json
 import os
 import re
@@ -62,6 +63,10 @@ SCOPE_ALIASES = {
     "gmail.send": "https://www.googleapis.com/auth/gmail.send",
     "gmail.modify": "https://www.googleapis.com/auth/gmail.modify",
     "userinfo.email": "https://www.googleapis.com/auth/userinfo.email",
+    # Drive (#1154): drive.file sees only files this app made or was handed; drive is everything.
+    "drive": "https://www.googleapis.com/auth/drive",
+    "drive.file": "https://www.googleapis.com/auth/drive.file",
+    "drive.readonly": "https://www.googleapis.com/auth/drive.readonly",
     # GA4: edit creates properties and data streams (Admin API), readonly runs
     # reports (Data API). Separate entries because a key enrolled for both mints
     # them separately -- setup asks for edit once, the weekly report asks for
@@ -143,6 +148,18 @@ def load_claude_tokens() -> dict:
 
 def resolve_scopes(requested: list[str]) -> list[str]:
     return [SCOPE_ALIASES.get(s, s) for s in requested]
+
+
+def token_scopes(tok: dict) -> Optional[set[str]]:
+    """The scopes a Google token response says it carries, or None when it doesn't say.
+
+    Google returns `scope` on both the code exchange and a refresh. A Workspace consent screen
+    has a box per scope, so what comes back can be narrower than what was asked for (#1154).
+    """
+    scope = tok.get("scope")
+    if not (isinstance(scope, str) and scope.strip()):
+        return None
+    return set(scope.split()) - {"openid"}     # sign-in, not an API scope anyone mints
 
 
 def caller_allowed(entry_scopes: list[str], caller: dict) -> bool:
@@ -294,22 +311,38 @@ async def oauth_callback(code: str = "", state: str = "", error: str = ""):
         if u.status_code == 200:
             email = u.json().get("email")
 
+    # Store what Google granted, not what the consent URL asked for: an unticked box drops a scope
+    # silently, and /mint checks requests against this list (#1154).
+    returned = token_scopes(tok)
+    granted = sorted(returned) if returned is not None else saved["google_scopes"]
+    dropped = sorted(set(saved["google_scopes"]) - set(granted))
+
     accounts = [a for a in load_accounts() if a["key"] != saved["key"]]
     accounts.append({
         "key": saved["key"], "email": email,
         "refresh_token": tok["refresh_token"],
         "allowed_scopes": saved["allowed_scopes"],
-        "google_scopes": saved["google_scopes"],
+        "google_scopes": granted,
         **({} if client_name == "default" else {"client": client_name}),
     })
     _write_json(ACCOUNTS_FILE, accounts)
     STATE_FILE.unlink()
     log_mint({"event": "account_enrolled", "key": saved["key"], "email": email, "client": client_name,
-              "google_scopes": saved["google_scopes"]})
+              "google_scopes": granted, "requested_scopes": saved["google_scopes"], "dropped_scopes": dropped})
+    key, allowed = html.escape(saved["key"]), html.escape(str(saved["allowed_scopes"]))
+    shown = html.escape(str(granted))
+    if dropped:
+        return HTMLResponse(f"""<!doctype html><html><body>
+<h1>Enrolled with fewer scopes than asked: {key}</h1>
+<p><strong>Google did not grant:</strong> <code>{html.escape(", ".join(dropped))}</code>.
+Its consent screen has a box for each scope, and these were not ticked.</p>
+<p>To add them, open the same enrolment link again and tick every box.</p>
+<p>Until then, <code>{html.escape(email or "")}</code> can mint only within <code>{shown}</code>,
+for samcloud scopes <code>{allowed}</code>.</p></body></html>""")
     return HTMLResponse(f"""<!doctype html><html><body>
-<h1>Account enrolled: {saved['key']}</h1>
-<p><code>{email}</code> — agents with samcloud scopes <code>{saved['allowed_scopes']}</code>
-can now mint 1h tokens scoped within <code>{saved['google_scopes']}</code>.</p>
+<h1>Account enrolled: {key}</h1>
+<p><code>{html.escape(email or "")}</code> — agents with samcloud scopes <code>{allowed}</code>
+can now mint 1h tokens scoped within <code>{shown}</code>.</p>
 <p>You can close this tab.</p></body></html>""")
 
 
@@ -346,8 +379,17 @@ async def mint(req: MintRequest, authorization: Optional[str] = Header(None)):
     async with httpx.AsyncClient(timeout=15) as c:
         r = await c.post(GOOGLE_TOKEN, data=data)
     if r.status_code != 200:
+        if "invalid_scope" in r.text:
+            # The stored list predates #1154 or the grant changed since: Google holds less than it says.
+            raise HTTPException(403, f"scopes not granted at consent: {sorted(set(requested))} "
+                                     f"(Google refused them for account '{req.account}'; its owner re-consents at /oauth/start)")
         raise HTTPException(502, f"Google rejected refresh: {r.text}")
     tok = r.json()
+    carried = token_scopes(tok)
+    if carried is not None and set(requested) - carried:
+        # Never hand back a token silently narrower than the caller asked for (#1154).
+        raise HTTPException(403, f"scopes not granted at consent: {sorted(set(requested) - carried)} "
+                                 f"(Google left them out of account '{req.account}'s token; its owner re-consents at /oauth/start)")
 
     log_mint({"identity": identity.get("username") or identity.get("user_id"),
               "samcloud_scopes": identity.get("scopes", []),

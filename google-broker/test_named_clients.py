@@ -95,6 +95,8 @@ def test_consent_through_an_unknown_client_is_refused(broker):
 
 class _FakeHTTP:
     seen = []
+    grant = ("https://www.googleapis.com/auth/youtube.readonly "
+             "https://www.googleapis.com/auth/calendar openid")
 
     def __init__(self, *a, **k):
         pass
@@ -112,7 +114,9 @@ class _FakeHTTP:
             status_code = 200
 
             def json(self):
-                return {"access_token": "at", "expires_in": 3599, "scope": "s"}
+                # Google echoes a down-scope; without one it returns the whole grant (#1154 checks it).
+                return {"access_token": "at", "expires_in": 3599,
+                        "scope": (data or {}).get("scope") or _FakeHTTP.grant}
         return R()
 
 
