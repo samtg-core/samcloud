@@ -3305,6 +3305,75 @@ class TestDocTree:
             assert list_calls < 60, list_calls
 
 
+class TestReadOnlyRequestsReadTheCallerOnce:
+    """A GET reads the caller's name and groups once (#1146). Lists and thread
+    reads used to re-read both for every row: 1,546 queries for one page of
+    tickets as a seat, 189 for one thread read, and the plane slowed for
+    everyone under the rails' steady thread reads."""
+
+    def _world(self, client, raw):
+        _create_group(client, "R", "R")
+        token, uid = _invite_and_activate(client, raw, "reader", ["group:R"])
+        client.patch(f"/api/v1/groups/R/members/{uid}", json={"role": "editor"})
+        seat = AuthedClient(raw, token)
+        th = seat.post("/api/v1/tickets", json={"summary": "root", "group_scope": "R"},
+                       headers={"X-Session-Id": "r1"}).json()["thread_id"]
+        for i in range(10):
+            seat.post("/api/v1/docs", json={"title": f"rd{i}", "body": "x", "group_scope": "R"},
+                      headers={"X-Session-Id": "r1", "X-Thread-Id": str(th)})
+        import db as dbmod
+        for i in range(200):
+            dbmod.execute("INSERT INTO tickets (source, summary, status, group_scope) VALUES ('admin', ?, 'open', 'R')",
+                          (f"bulk {i}",))
+        return seat, uid, th
+
+    def _count(self, fn):
+        import db as dbmod
+        calls = {"n": 0}
+        rq, rq1 = dbmod.query, dbmod.query_one
+        def q(*a, **k):
+            calls["n"] += 1; return rq(*a, **k)
+        def q1(*a, **k):
+            calls["n"] += 1; return rq1(*a, **k)
+        with patch.object(dbmod, "query", q), patch.object(dbmod, "query_one", q1):
+            out = fn()
+        return out, calls["n"]
+
+    def test_lists_and_thread_reads_stay_within_a_small_budget(self, client):
+        app = _get_app()
+        with TestClient(app) as raw:
+            seat, uid, th = self._world(client, raw)
+            r, n = self._count(lambda: seat.get("/api/v1/tickets?limit=5"))
+            assert r.status_code == 200 and len(r.json()) == 5
+            assert n < 30, n
+            r, n = self._count(lambda: seat.get("/api/v1/search?q=bulk&limit=5"))
+            assert r.status_code == 200 and r.json()["total"] == 200
+            assert n < 30, n
+            r, n = self._count(lambda: seat.get(f"/api/v1/threads/{th}"))
+            assert r.status_code == 200
+            assert n < 60, n
+
+    def test_a_membership_change_is_seen_on_the_next_request(self, client):
+        app = _get_app()
+        with TestClient(app) as raw:
+            seat, uid, th = self._world(client, raw)
+            _create_group(client, "Q", "Q")
+            d = client.post("/api/v1/docs", json={"title": "in Q", "body": "q", "group_scope": "Q"}).json()["doc_id"]
+            assert seat.get(f"/api/v1/docs/{d}").status_code == 404
+            client.post("/api/v1/groups/Q/members", json={"user_id": uid, "role": "viewer"})
+            assert seat.get(f"/api/v1/docs/{d}").status_code == 200
+            client.delete(f"/api/v1/groups/Q/members/{uid}")
+            assert seat.get(f"/api/v1/docs/{d}").status_code == 404
+
+    def test_a_write_request_is_never_cached(self, client):
+        import main
+        ctx = main.AuthContext("agent", "user:1", [])
+        assert ctx.read_only is False
+        import scope as groupscope
+        groupscope.memberships(ctx)
+        assert getattr(ctx, "_memberships_memo", None) is None
+
+
 class TestReplayGuard:
     """Comment replay tripwire (v0.7.71, the #363 fossil: 4 posts, 3 identities)."""
 

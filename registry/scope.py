@@ -79,6 +79,20 @@ def memberships(auth) -> Optional[dict]:
     that hold its device, as editor. `device:`/`services:` scopes name no group."""
     if auth.is_admin():
         return None
+    # A read-only request (GET, HEAD) changes no membership, so the answer is
+    # kept on its AuthContext. Without this, a list or a thread read that
+    # checks each row re-read the caller's groups for every row: 1,546 queries
+    # for one page of tickets, 189 for one thread read (#1146).
+    memo = getattr(auth, "_memberships_memo", None)
+    if memo is not None:
+        return dict(memo)
+    out = _memberships_uncached(auth)
+    if getattr(auth, "read_only", False):
+        auth._memberships_memo = dict(out)
+    return out
+
+
+def _memberships_uncached(auth) -> dict:
     out = {}
     uid = _user_id(auth.owner_id)
     if (uid is None and auth.token_type == "agent" and auth.owner_id
