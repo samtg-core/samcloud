@@ -9485,7 +9485,7 @@ def api_index():
                 "watchers": {"method": "GET", "path": "/api/v1/docs/{id}/watchers", "auth": "any"},
             },
             "files": {
-                "upload": {"method": "POST", "path": "/api/v1/files", "auth": "any", "description": "Multipart upload (file, group_scope). Owner is bearer-derived. The answer carries url and markdown, a ready embed to paste into a ticket, task or doc"},
+                "upload": {"method": "POST", "path": "/api/v1/files", "auth": "any", "description": "Multipart upload (file, group_scope). Owner is bearer-derived. The answer carries url and markdown, a ready embed to paste into a ticket, task or doc. A service sends grant= (no group_scope) with its own token to upload for the caller who minted it: the grant's group, owner the caller, uploaded_by the service"},
                 "list": {"method": "GET", "path": "/api/v1/files", "auth": "any", "description": "Files you can see, newest first (?kind=image ?q=name ?mine=true); each with url and markdown"},
                 "get": {"method": "GET", "path": "/api/v1/files/{id}", "auth": "any"},
                 "raw": {"method": "GET", "path": "/api/v1/files/{id}/raw", "auth": "any", "description": "The bytes, with their declared type"},
@@ -9493,6 +9493,11 @@ def api_index():
                 "delete": {"method": "DELETE", "path": "/api/v1/files/{id}", "auth": "owner"},
                 "link": {"method": "POST", "path": "/api/v1/files/{id}/links", "auth": "any", "description": "Attach to a ticket, task or doc, so that object's readers can open it"},
                 "unlink": {"method": "DELETE", "path": "/api/v1/files/{id}/links/{link_id}", "auth": "linker/owner"},
+            },
+            "grants": {
+                "create": {"method": "POST", "path": "/api/v1/grants", "auth": "person or agent", "description": "{service_id, group_scope?, ttl_s? (60..604800, default 86400)}: let one service upload files into one group you edit, owned by you. Answers the grant once (sc_grant_…); it is useless without that service's own token"},
+                "list": {"method": "GET", "path": "/api/v1/grants", "auth": "any", "description": "The grants you made (admin: all), with uses and expiry; never the grant itself"},
+                "revoke": {"method": "DELETE", "path": "/api/v1/grants/{id}", "auth": "creator/admin", "description": "End a grant now"},
             },
             "tasks": {
                 "projects": {"method": "GET", "path": "/api/v1/projects", "auth": "any", "description": "Task plane — projects with computed progress rollups (?status ?group_scope). doc=record, ticket=request, task=actionable item"},

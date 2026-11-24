@@ -1,4 +1,4 @@
-<!-- SKILL_VERSION: 3.13.1 -->
+<!-- SKILL_VERSION: 3.13.2 -->
 # queue — get compute by asking for it and waiting
 
 Every machine on samcloud registers its compute — a GPU, its memory — as a **resource**. Each resource has one **queue**. You ask for what your job really needs, you wait your turn with no deadline, you run, and you give it back. Local models, renders, splat jobs and tools all take their turn in the same queue.
@@ -20,6 +20,8 @@ GET /services/{id}                               one service: description, endpo
 
 A service such as image generation or image-to-splat takes the lease itself. You send it the job and wait for the result; you do not take a lease to call a service. If the answer is "queued", it is working: keep waiting on the job, and do not send it again.
 
+The results come back to you through the service's own API. To have them stored as plane files you own, send a grant with the job: `tools.md`, "Find and call a service".
+
 ## Run your own job: take a lease
 
 ```
@@ -37,7 +39,7 @@ Release on every path out of the job: success, failure and crash. If you find a 
 
 ## Build a service: give the queue a healthy consumer
 
-A service you build takes leases on behalf of its callers, so it answers for them. To register it and give it a route, see "Register a service" in `tools.md`.
+A service you build takes leases on behalf of its callers, so it answers for them. It leases with its own service token, as itself. "Register a service" in `tools.md` covers its identity, the route, and how it returns results.
 
 - Take a lease only for real work, sized to that work.
 - Release or withdraw the lease on every failure: the wait, the load, the run.

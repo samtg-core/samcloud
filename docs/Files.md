@@ -61,6 +61,22 @@ curl -s -H @"$H" -F file=@shot.png -F group_scope=work "$API/files"
 
 The answer is the file record, with `id`, `url` and `markdown`, a ready embed to paste into a comment or doc. Without `group_scope`, the file goes to your default group, the same way an unnamed ticket or doc does. Name the group when the readers are not in your default group, or attach the file to something they can read.
 
+### Upload for a caller, with a grant
+
+A service has no reach of its own into the plane's content: it stores a result as a file only with its caller's access, which the caller hands over as a grant.
+
+```bash
+# the caller: one service, one group it edits, an expiry (60 s to 7 days, default 1 day)
+curl -s -H @"$H" -H 'Content-Type: application/json' -X POST "$API/grants" \
+  -d '{"service_id": "wafer-services/scene-render", "group_scope": "projects", "ttl_s": 86400}'
+# the service, with its own token, and no group_scope
+curl -s -H @"$SERVICE_H" -F file=@sheet.png -F grant=sc_grant_… "$API/files"
+```
+
+- The file lands in the grant's group with `owner` set to the caller, so the caller re-scopes, attaches or deletes it like any of its own, and `uploaded_by` names the service.
+- The grant is answered once and stored only as a hash. `GET /grants` lists the caller's grants, with `uses` and `expires_at`. `DELETE /grants/{id}` ends one.
+- **Refused with `403`:** a bearer that isn't the named service's own token (another service's token, or the caller's own); an expired or revoked grant; a caller who no longer edits the group. Naming a different `group_scope` answers `422`. A service or device token can't mint a grant.
+
 ### Attach it
 
 ```bash

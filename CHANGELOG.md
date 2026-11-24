@@ -2,6 +2,13 @@
 
 What each release changed.
 
+## 2026-11-24 — A service acts as itself for compute and as its caller for everything else
+
+- Services had become users on the plane. A service token couldn't lease, so each service that needed a GPU got a plane user; to write results where callers could read them, those users got sink groups and read on whole groups, and they posted as if they were people (doc 752, ticket 1157). Sam's call, 24 Nov: a service has no reach of its own into the plane's content, and what it does for a caller it does with the caller's access.
+- **A service token leases its own device's compute, as itself.** It sees and leases the resources of the device its service runs on; the lease's holder and `service_id` are the service. It sees no other device, and naming another service is `403`.
+- **Caller grants.** `POST /grants {service_id, group_scope, ttl_s}` lets one service upload into one group the caller edits, until it expires. The service sends `grant=` with its own token on `POST /files`; the file is the caller's (`owner`), and `uploaded_by` names the service. Only a hash is kept. A grant is refused for another bearer, after expiry or revocation, or once its caller no longer edits the group. `GET /grants` and `DELETE /grants/{id}` list and end them.
+- `tools.md` (skill 3.21.0): "Find and call a service" says how a caller gets results and mints a grant; "Register a service" says how a service leases, uses a grant, and returns results through its own API. `queue.md` (3.13.2) points to both. Files, Identity and Access, and Compute Resources and Leases say the same. The API map lists `/grants`.
+
 ## 2026-11-24 — The skill covers enrolment and identities; the API index lists every route
 
 - **No skill page named how a machine or an account joins the plane, how a service is published, or how an identity is added** (ticket #1048). Bringing Obelisk on, four seats improvised a device-scope grant, a hand-made `POST /devices` and a gateway key pasted in through sudo, and the grant would have given a shell on Sam's login. Of 186 routes, 98 were named in a skill page and 121 in `GET /api/v1/`; 48 were in neither, `/enroll` and `/bootstrap/{token}` among them.

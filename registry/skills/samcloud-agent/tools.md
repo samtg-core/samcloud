@@ -1,4 +1,4 @@
-<!-- SKILL_VERSION: 3.20.0 -->
+<!-- SKILL_VERSION: 3.21.0 -->
 # tools — the API, the write tool, the helpers, the machines
 
 ## The API
@@ -328,6 +328,19 @@ In each entry of `GET /services`:
 
 `GET /services/{id}/guide` is written for whoever operates the service, not for callers. To call one, start from its `external_url` and its `docs_endpoint` when one is set, or use a helper your seat already has for it. A queued service takes its own lease when it runs your request. You take a lease yourself only for compute you run directly.
 
+**The results come back to you, through the service.** Poll the job it names until it's `done` or `failed`, then download what it made. A service posts nothing on the plane for you.
+
+**To have them stored as plane files you own,** mint a grant and send it with the job as `"grant"`. The service uploads into the group you named, and the files are yours: embed, attach, re-scope or delete them like any of your own.
+
+```
+POST /grants {"service_id": "<service id>", "group_scope": "<a group you edit>", "ttl_s": 86400}
+     → {"id": 12, "grant": "sc_grant_…", "expires_at": "…"}     the grant is shown once
+GET    /grants                       the grants you made, and how often each was used
+DELETE /grants/{id}                  end one now
+```
+
+A grant lets that one service upload into that one group until it expires, and nothing else. It is useless to anyone without that service's own token. **Never send your own token in its place:** a service checks your bearer during the request, and that is all it should ever hold.
+
 ## Register a service
 
 A service is something you run on a machine that others call. Register it so callers can find it in `GET /services` and, with a `subdomain`, reach it at the `external_url` the reply names.
@@ -350,6 +363,13 @@ curl -s -H @"$HOME/.samcloud/token.hdr" -H 'Content-Type: application/json' \
 - **Before you share the URL,** call it from outside with no token: every route that needs sign-in answers `401`.
 - **Who sees it:** the groups that hold its device. Put in the `description` how to call it, so callers don't have to ask you.
 - When a service takes compute for its callers, `queue.md` has what it owes the queue.
+
+**A registered service acts as itself for its own compute and as its caller for everything else.**
+- **Compute:** it leases with its own service token, on the device it runs on (`POST /resources/{id}/leases`). The lease names the service as its holder. It can't lease another device's compute, or lease as another service.
+- **No reach of its own into the plane's content:** it posts no comments and links nothing.
+- **Reads for a caller:** the caller's bearer, checked with `GET /auth/verify`, used during that request and never stored.
+- **Results as plane files:** `POST /files` with the service token, `-F grant=<the caller's grant>` and no `group_scope`. The file lands in the grant's group, owned by the caller, with `uploaded_by` naming the service. A grant that has expired or been revoked, or whose caller no longer edits the group, is refused with `403`: report that in the job.
+- **Its own API returns the results:** submit, then poll (`queued`, `running`, `done` or `failed`, with the reason and the log tail when it failed), then download. Check the caller's bearer on every read, not only at submit. Say in the job how long results are kept. Return the file ids of anything uploaded on a grant.
 
 ```
 POST   /services/{id}/health      with the service token: marks it online
@@ -407,6 +427,8 @@ machine: a host path is something nobody else can open.
 **Embedding a file in a doc body does not attach it** — a markdown link is text, and only
 `POST /files/{id}/links` creates the attachment the union reads. You can attach only to a doc,
 ticket or task you can read; anything else answers 404.
+
+**A file a service uploaded on your grant is yours** (`owner` is you, `uploaded_by` names the service), in the group the grant named: "Find and call a service".
 
 **To change a file's group, `PATCH /files/{id}`** (owner or admin). Re-uploading makes a second
 file and leaves the first where it was.
