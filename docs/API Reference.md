@@ -654,9 +654,9 @@ A mention (`@name`) notifies that member of the ticket's group; `notes` says whe
 
 | Method | Path | Auth | Description |
 |---|---|---|---|
-| GET | `/api/v1/docs` | scoped | Docs you can see, without bodies. `?kind`, `?status`, `?group_scope`, `?linked_ticket`, `?q`, `?parent_id` |
+| GET | `/api/v1/docs` | scoped | Docs you can see, without bodies. `?kind`, `?status`, `?group_scope`, `?linked_ticket`, `?q`, `?parent` (or `?parent_id`), `?root=true`, `?sort` (`updated`, `created`, `title`, `id`, `children`), `?order` (`asc`, `desc`), `?limit` (200, at most 500), `?offset`. Each row has `path` and `child_count`; the page has `total` and `next_offset` |
 | POST | `/api/v1/docs` | editor | Create a doc: revision 1. `source` is the bearer's identity; `owner` defaults to it. Returns `thread_id` |
-| GET | `/api/v1/docs/{ident}` | scoped | A doc by slug or id: head body and links. `?rev=N` for a past revision |
+| GET | `/api/v1/docs/{ident}` | scoped | A doc by slug or id: head body and links, `path` (ancestors, root first), `path_text`, `siblings` (`previous`, `next` under the same parent), `children`, `parent`. `?rev=N` for a past revision |
 | PATCH | `/api/v1/docs/{doc_id}` | owner of the doc | Lifecycle metadata: `status`, `kind`, `group_scope`, `supersedes`, `parent_doc_id`, `owner` |
 | DELETE | `/api/v1/docs/{doc_id}` | owner of the doc | Permanent, with its history; prefer PATCH `status=archived` |
 | GET | `/api/v1/docs/{doc_id}/revisions` | scoped | Revision history (metadata) |
@@ -741,7 +741,7 @@ A mention (`@name`) notifies that member of the ticket's group; `notes` says whe
 
 | Method | Path | Auth | Description |
 |---|---|---|---|
-| GET | `/api/v1/search` | any | Tickets, tasks and docs you can see whose title, body or comments hold every word of `?q` (case-insensitive; `#N` or `N` also matches that id). `?kind=ticket,task,doc`, `?status` (comma list; `active` = open/triaged/in-progress tickets, todo/in-progress/blocked tasks, draft/active docs), `?assignee` (`:me`; a doc's owner), `?group_scope`, `?tag` (tickets and tasks), `?updated_hours`, `?limit` (30, at most 100), `?offset` |
+| GET | `/api/v1/search` | any | Tickets, tasks and docs you can see whose title, body or comments hold every word of `?q` (case-insensitive; `#N` or `N` also matches that id). `?kind=ticket,task,doc`, `?status` (comma list; `active` = open/triaged/in-progress tickets, todo/in-progress/blocked tasks, draft/active docs), `?assignee` (`:me`; a doc's owner), `?group_scope`, `?tag` (tickets and tasks), `?updated_hours`, `?limit` (30, at most 100), `?offset`, `?sort` (`relevance`, or `updated` for newest first). A doc hit has `path` and `path_text` |
 
 Each item carries `kind`, `id`, `title`, `status`, `href`, `ref` (a markdown link), `assignee`, `project`, `group_scope`, `updated_at`, `match` (`id`, `title`, `body` or `comment`) and `snippet`; the answer adds `total` and per-kind `counts`. Ranked by id, then title, body and comment matches, newest first within. With no `q`, the filters alone apply, newest first.
 

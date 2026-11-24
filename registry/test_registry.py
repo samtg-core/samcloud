@@ -3196,6 +3196,80 @@ class TestDocHierarchy:
         assert r.status_code == 400
 
 
+class TestDocTree:
+    """Docs as a tree (#1146): the list pages and sorts, and every read, list
+    row and search hit says where the doc sits."""
+
+    def _tree(self, client):
+        mk = lambda title, parent=None: client.post("/api/v1/docs", json={
+            "title": title, "body": f"tree {title}",
+            **({"parent_doc_id": parent} if parent else {})}).json()["doc_id"]
+        top = mk("Top section")
+        mid = mk("Middle", top)
+        a = mk("Leaf a", mid)
+        b = mk("Leaf b", mid)
+        c = mk("Leaf c", mid)
+        loose = mk("Loose leaf")
+        return top, mid, a, b, c, loose
+
+    def test_read_shows_path_and_siblings(self, client):
+        top, mid, a, b, c, loose = self._tree(client)
+        got = client.get(f"/api/v1/docs/{b}").json()
+        assert [p["id"] for p in got["path"]] == [top, mid]
+        assert got["path"][0]["title"] == "Top section"
+        assert got["path_text"] == "Top section / Middle / Leaf b"
+        assert got["siblings"]["previous"]["id"] == a and got["siblings"]["next"]["id"] == c
+        first = client.get(f"/api/v1/docs/{a}").json()["siblings"]
+        assert first["previous"] is None and first["next"]["id"] == b
+        root = client.get(f"/api/v1/docs/{loose}").json()
+        assert root["path"] == [] and root["path_text"] == "Loose leaf"
+        assert root["siblings"] == {"previous": None, "next": None}
+
+    def test_list_root_parent_sort_and_pages(self, client):
+        top, mid, a, b, c, loose = self._tree(client)
+        roots = client.get("/api/v1/docs?root=true&sort=children").json()
+        assert roots["docs"][0]["id"] == top and roots["docs"][0]["child_count"] == 1
+        assert {d["id"] for d in roots["docs"]} == {top, loose}
+        kids = client.get(f"/api/v1/docs?parent={mid}&sort=id").json()
+        assert [d["id"] for d in kids["docs"]] == [a, b, c]
+        assert [p["id"] for p in kids["docs"][0]["path"]] == [top, mid]
+        p1 = client.get(f"/api/v1/docs?parent={mid}&sort=title&limit=2").json()
+        assert [d["title"] for d in p1["docs"]] == ["Leaf a", "Leaf b"]
+        assert p1["total"] == 3 and p1["next_offset"] == 2
+        p2 = client.get(f"/api/v1/docs?parent={mid}&sort=title&limit=2&offset=2").json()
+        assert [d["title"] for d in p2["docs"]] == ["Leaf c"] and p2["next_offset"] is None
+        desc = client.get(f"/api/v1/docs?parent={mid}&sort=id&order=desc").json()
+        assert [d["id"] for d in desc["docs"]] == [c, b, a]
+        assert client.get("/api/v1/docs?sort=size").status_code == 400
+        # the default is what it always was: newest updated first, up to 200
+        assert client.get("/api/v1/docs").json()["limit"] == 200
+
+    def test_search_hits_carry_the_path(self, client):
+        top, mid, a, b, c, loose = self._tree(client)
+        r = client.get("/api/v1/search?q=tree&kind=doc&sort=updated").json()
+        hit = next(x for x in r["items"] if x["id"] == b)
+        assert hit["path_text"] == "Top section / Middle / Leaf b"
+        assert [p["id"] for p in hit["path"]] == [top, mid]
+        assert client.get("/api/v1/search?q=tree&sort=size").status_code == 400
+
+    def test_an_ancestor_you_cannot_read_is_a_bare_id(self, client):
+        app = _get_app()
+        with TestClient(app) as raw:
+            for g in ("T", "H"):
+                _create_group(client, g, g)
+            token, uid = _invite_and_activate(client, raw, "tree-seat", ["group:T"])
+            client.patch(f"/api/v1/groups/T/members/{uid}", json={"role": "editor"})
+            seat = AuthedClient(raw, token)
+            hidden = client.post("/api/v1/docs", json={"title": "Admin only", "body": "x",
+                                                       "group_scope": "H"}).json()["doc_id"]
+            mine = seat.post("/api/v1/docs", json={"title": "Seat doc", "body": "y",
+                                                   "group_scope": "T"}).json()["doc_id"]
+            assert client.patch(f"/api/v1/docs/{mine}", json={"parent_doc_id": hidden}).status_code == 200
+            got = seat.get(f"/api/v1/docs/{mine}").json()
+            assert got["path"] == [{"id": hidden}]
+            assert got["path_text"] == f"#{hidden} / Seat doc"
+
+
 class TestReplayGuard:
     """Comment replay tripwire (v0.7.71, the #363 fossil: 4 posts, 3 identities)."""
 

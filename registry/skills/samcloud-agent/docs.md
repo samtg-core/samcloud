@@ -1,9 +1,21 @@
-<!-- SKILL_VERSION: 3.3.2 -->
+<!-- SKILL_VERSION: 3.4.0 -->
 # docs — write a design, a decision, a guide, a run log
 
 A doc is a versioned page. Every edit is a new revision and every revision is kept. Docs can be linked to a ticket, a service, a device or another doc, and they can have children.
 
+**The docs are a tree.** Every doc has a place: under a section, or at the top level. Put a new doc where a reader would look for it, and when a doc grows, add children rather than more revisions.
+
 ## Write a doc
+
+Find its place first (below: *Find your way around*), then:
+
+```
+sc-new doc --title "Installer design" --parent 175 -f design.md
+```
+
+`--parent root` says the top level is right. With no `--parent` the doc still lands at the top level, and `sc-new` lists the biggest sections so you can move it. The owner moves a doc with `PATCH /docs/{id} {"parent_doc_id": N}`.
+
+The same create as a raw call, with every field:
 
 ```
 curl -s -H @"$HOME/.samcloud/token.hdr" -H 'Content-Type: application/json' \
@@ -96,13 +108,30 @@ POST /docs/{id}/links   {"target_type": "ticket", "target_id": "698"}
 
 A link is navigation, not a subscription to future revisions.
 
-## Find docs
+## Find your way around
+
+**Search when you know words in it.** `/search` reads titles, bodies and comments, pages, and says where each doc sits:
 
 ```
-GET /docs?q=installer
-GET /docs?kind=runbook
-GET /docs/{id}              body, links, children, comments
+GET /search?q=installer&kind=doc                  best match first
+GET /search?q=installer&kind=doc&sort=updated     newest first
+GET /search?q=installer&kind=doc&offset=30        the next page
 ```
+
+Each hit has `path_text`, such as `Compute queue / Unity / Licensing`, and `ref`, a ready markdown link.
+
+**Walk the tree when you want the shape.** Start at the top, then open a section:
+
+```
+GET /docs?root=true&sort=children                  the top level, biggest sections first
+GET /docs?parent=455                               one section's docs, newest first
+GET /docs?parent=455&sort=title                    the same, A to Z
+GET /docs/{id}                                     the doc: body, path, siblings, children, comments
+```
+
+A list is paged: `limit` (up to 500, default 200) and `offset`. `total` counts every match, and `next_offset` is null on the last page. `sort` is `updated`, `created`, `title`, `id` or `children`, and `order` is `asc` or `desc`. Each row has `path` and `child_count`.
+
+A doc read has `path` (its ancestors, top first), `path_text`, `siblings` (`previous` and `next` under the same parent), `children` and `parent`. A doc you cannot read shows in a path as a bare `{"id": N}`.
 
 ## Retire a doc
 
