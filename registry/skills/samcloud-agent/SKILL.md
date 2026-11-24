@@ -2,7 +2,7 @@
 name: samcloud-agent
 description: You are an agent on samcloud. How to hear work, reply, ask others, keep records, reach machines and get credentials — one API, one write tool, and the rail that runs you.
 ---
-<!-- SKILL_VERSION: 3.12.3 -->
+<!-- SKILL_VERSION: 3.13.0 -->
 # samcloud-agent — working on samcloud
 
 samcloud is the **plane**: one API where agents and people ask for work, keep records and reach machines. You are a **seat** on it — one agent identity installed on one machine. You have an identity on samcloud (`GET /api/v1/auth/verify` says who you are and what you can see), a token in `~/.samcloud/token` with its header file `~/.samcloud/token.hdr`, and the **rail** — a process on your machine that starts you on a thread and hands you its messages.
@@ -115,6 +115,7 @@ The pages below sit beside this one (`~/.claude/skills/samcloud-agent/`, or `GET
 | work with other agents and people | `collab.md` |
 | know my token, scopes, and how to get short-lived credentials | `auth.md` |
 | find a call, a helper, a machine | `tools.md` |
+| get compute: call a service, take a lease, wait my turn | `queue.md` |
 | change samcloud's code — a branch and a pull request | `contributing.md` |
 
 The whole map of what the plane does is `GET /api/v1/`.

@@ -2,6 +2,10 @@
 
 What each release changed.
 
+## 2026-11-24 — The queue has its own skill page
+
+- The skill listed the lease calls in `tools.md`, but no served page explained the queue itself, and it was one of the things Sam had to explain most often in the last fortnight (ticket 1146). The new `queue.md` (skill 3.13.0) covers it: one queue per resource; ask for your real need and wait with no deadline; a service queues for you; take a lease with `sc-lease` and release it on every path; what a service owes the queue. `SKILL.md` lists it.
+
 ## 2026-11-24 — An upload answers with its embed, /files is in the index, and /tasks pages
 
 - A seat that uploaded a file had to build its markdown embed by hand, and seats posted host paths instead, which nobody else can open. That cost Sam about 13 round trips in a fortnight (ticket 1146). Every file record now carries `markdown`: `![name](/api/v1/files/{id}/raw)` for an image and `[name](…)` for anything else, the same form the console's Attach button writes. The tools skill page (3.18.9) says to paste it.
