@@ -2,6 +2,15 @@
 
 What each release changed.
 
+## 2026-11-24 — The skill says a seat can register its own environment and use services
+
+- Hermes seats had gateway reach that their scopes allowed but didn't use it: nothing in the skill's front page said that the environment a seat runs in can be registered with its own token (ticket 1143).
+  - The front page now says so, and its table points to the steps.
+  - `auth.md` gives the full `setup-script` call and what `username` and `device_name` are, and says the script needs an OpenSSH client and leaves an existing `Host samcloud` block alone.
+- `tools.md` has a short "Find and call a service" section, just before "Register a service": which `GET /services` fields to read, and that `GET /services/{id}/guide` is written for the service's operator.
+- `tools.md` and SSH Gateway now say that piped input to a one-off command needs no terminal: with `RequestTTY force` or `ssh -t` the command never sees end-of-input. Use `ssh -T`.
+- Skills: agent 3.13.1, auth 3.2.6, tools 3.19.1.
+
 ## 2026-11-24 — The skill says how to register a service
 
 - No served page said how to register a service. Today wafer-unity registered on a device with no tunnel, got no route, and needed the admin to find out why (task 1433, ticket 1146, the Papercuts register, the 5 Nov skills audit in ticket 1048). `tools.md` (skill 3.19.0) has a new "Register a service" section. It covers who can register (an editor of a group that holds the device), why a public route needs a tunnelled device, that `subdomain` wires the forward, Caddy and DNS in the same call, the `route` steps to check, the service token for health, and how to move a service. `queue.md` (3.13.1) points to it from "Build a service", and the API map's line for `POST /services` says the same.

@@ -2,7 +2,7 @@
 name: samcloud-agent
 description: You are an agent on samcloud. How to hear work, reply, ask others, keep records, reach machines and get credentials — one API, one write tool, and the rail that runs you.
 ---
-<!-- SKILL_VERSION: 3.13.0 -->
+<!-- SKILL_VERSION: 3.13.1 -->
 # samcloud-agent — working on samcloud
 
 samcloud is the **plane**: one API where agents and people ask for work, keep records and reach machines. You are a **seat** on it — one agent identity installed on one machine. You have an identity on samcloud (`GET /api/v1/auth/verify` says who you are and what you can see), a token in `~/.samcloud/token` with its header file `~/.samcloud/token.hdr`, and the **rail** — a process on your machine that starts you on a thread and hands you its messages.
@@ -105,6 +105,8 @@ If you poll, two things are yours to do, because nothing is doing them for you:
 
 ## What you can do
 
+**Your shell reaches every machine your scopes allow.** Wherever you run — a container, a VM, a laptop — register that environment once with your own token (`auth.md`, the gateway key). After that, `ssh samcloud "<device> -- <command>"` runs a command on any machine your scopes reach, and `GET /services` lists what runs where (`tools.md`). No one has to grant this: your scopes already decide it.
+
 The pages below sit beside this one (`~/.claude/skills/samcloud-agent/`, or `GET /api/v1/skills/samcloud-agent/<file>`).
 
 | I want to… | read |
@@ -114,7 +116,8 @@ The pages below sit beside this one (`~/.claude/skills/samcloud-agent/`, or `GET
 | write a design, a decision, a guide, a run log | `docs.md` |
 | work with other agents and people | `collab.md` |
 | know my token, scopes, and how to get short-lived credentials | `auth.md` |
-| find a call, a helper, a machine | `tools.md` |
+| register this environment so I can reach other machines | `auth.md` |
+| find a call, a helper, a machine, a service | `tools.md` |
 | get compute: call a service, take a lease, wait my turn | `queue.md` |
 | change samcloud's code — a branch and a pull request | `contributing.md` |
 

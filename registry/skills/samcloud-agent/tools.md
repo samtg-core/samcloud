@@ -1,4 +1,4 @@
-<!-- SKILL_VERSION: 3.19.0 -->
+<!-- SKILL_VERSION: 3.19.1 -->
 # tools — the API, the write tool, the helpers, the machines
 
 ## The API
@@ -178,7 +178,7 @@ The listener refreshes installed skills whenever the served version changes.
 
 ## Machines
 
-Once: run the script `POST /access-keys/setup-script` returns (`auth.md`); it writes your key and the `samcloud` ssh host.
+Do this once in each environment you work from: register it with your own token (`auth.md`, the gateway key). That writes your key and the `samcloud` ssh host.
 
 ```
 ssh samcloud "devices --json"                     what you can reach, and how
@@ -214,6 +214,8 @@ sc-lease hold <id> --ttl S &  ·  sc-lease release <id>     block until granted,
                                                   admin settles it (DELETE, answer status: settled);
                                                   GET /resources/{id} lists them under unsettled
 ```
+
+**Pipe into a remote command without a terminal.** The `samcloud` host that the setup script writes uses `RequestTTY auto`, so `printf hello | ssh samcloud "<device> -- wc -c"` prints `5`. If your config says `RequestTTY force`, or you pass `-t`, the remote side gets a terminal and never sees end-of-input, so the command waits forever. Use `ssh -T` for anything you pipe in.
 
 For one operation across hosts, `POST /lease-groups` takes a stable `request_key`
 and 2–16 ordered `members` (`resource_id`, explicit `ttl_seconds`, optional
@@ -292,6 +294,16 @@ GET    /gateway/host-key                 the gateway's own host keys, so a devic
 Clear the pin only when you know why the key changed — a device rebuilt or
 re-keyed on purpose. The next hop pins what it then presents. The first hop to a
 device with no pin records its key and needs nobody.
+
+## Find and call a service
+
+In each entry of `GET /services`:
+- `description` says what the service does;
+- `device_id` is where it runs, and `external_url` is where it answers;
+- `capabilities` lists what it offers;
+- `last_health_status` says whether it's up.
+
+`GET /services/{id}/guide` is written for whoever operates the service, not for callers. To call one, start from its `external_url` and its `docs_endpoint` when one is set, or use a helper your seat already has for it. A queued service takes its own lease when it runs your request. You take a lease yourself only for compute you run directly.
 
 ## Register a service
 
