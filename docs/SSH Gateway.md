@@ -131,7 +131,7 @@ Every hop checks the target's host key: see [Host-key trust](#host-key-trust).
 - **If the registry does not answer,** the gateway denies.
 - **What is recorded.** The registry records what it does itself: access keys minted and revoked, `authorized_keys` syncs, enrolment and activation, and host-key pins, conflicts and clears. The gateway also reports each connection (`gateway.connect`), route and one-off command (`gateway.route.<device>`, `gateway.exec.<device>`), denial (`gateway.route.denied`, `gateway.exec.denied`, `gateway.shell.denied`), admin shell (`gateway.shell`) and host-key event to `POST /api/v1/audit`. The registry serves no such route, so those reports are not recorded.
 - **A one-off command adds no privilege.** It runs as the same account an interactive shell lands in, after the same admission check.
-- **A one-off command gets no end-of-input.** The gateway doesn't pass stdin EOF through to the remote command, so `ssh samcloud "<device> -- cat > f" < f` never returns. Put the data in the command line (base64, decoded on the far side) and run `ssh` with `< /dev/null`.
+- **Piped input needs no terminal.** A one-off command receives your stdin and its end, so `ssh samcloud "<device> -- cat > f" < f` works with the setup script's `RequestTTY auto`. If a terminal is forced (`RequestTTY force` or `ssh -t`), the remote side never sees end-of-input and the command waits forever. Use `ssh -T` for piped input.
 
 What a shell on a device means for the tokens kept there is set out in [Identity and Access](Identity%20and%20Access.md#what-you-land-in) and [Security](Security.md).
 

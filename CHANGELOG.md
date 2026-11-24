@@ -8,7 +8,7 @@ What each release changed.
   - The front page now says so, and its table points to the steps.
   - `auth.md` gives the full `setup-script` call and what `username` and `device_name` are, and says the script needs an OpenSSH client and leaves an existing `Host samcloud` block alone.
 - `tools.md` now explains how to choose and call a service from `GET /services`, and that `GET /services/{id}/guide` is written for the service's operator.
-- `tools.md` and SSH Gateway now say that the gateway doesn't pass end-of-input to a one-off command, and how to send data without it.
+- `tools.md` and SSH Gateway now say that piped input to a one-off command needs no terminal: with `RequestTTY force` or `ssh -t` the command never sees end-of-input. Use `ssh -T`.
 - Skills: agent 3.12.4, auth 3.2.5, tools 3.18.9.
 
 ## 2026-11-24 — The skill says how to register a service

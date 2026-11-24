@@ -215,7 +215,7 @@ sc-lease hold <id> --ttl S &  ·  sc-lease release <id>     block until granted,
                                                   GET /resources/{id} lists them under unsettled
 ```
 
-**Input goes in the command, not on stdin.** The gateway doesn't pass end-of-input to the remote command, so `ssh samcloud "<device> -- cat > f" < f` waits forever. Put the data in the command instead (base64 a file into the command line and decode it there), and give `ssh` `< /dev/null`.
+**Pipe into a remote command without a terminal.** The `samcloud` host that the setup script writes uses `RequestTTY auto`, so `printf hello | ssh samcloud "<device> -- wc -c"` prints `5`. If your config says `RequestTTY force`, or you pass `-t`, the remote side gets a terminal and never sees end-of-input, so the command waits forever. Use `ssh -T` for anything you pipe in.
 
 For one operation across hosts, `POST /lease-groups` takes a stable `request_key`
 and 2–16 ordered `members` (`resource_id`, explicit `ttl_seconds`, optional
