@@ -4784,13 +4784,89 @@ def _doc_view(doc: dict, rev: Optional[int] = None) -> dict:
     return out
 
 
+class _DocTree:
+    """The doc tree as one caller sees it (#1146): every doc row once, so a
+    list, a read or a search page can give paths and child counts without a
+    query per row. A doc the caller cannot read appears in a path as a bare
+    id, the way a thread shows a member you cannot read."""
+
+    def __init__(self, auth: AuthContext):
+        self.rows = {d["id"]: d for d in db.query(
+            "SELECT id, slug, title, parent_doc_id, source, owner, group_scope FROM docs")}
+        self.visible = {i for i, d in self.rows.items() if _can_see_doc(auth, d)}
+        self.children: dict = {}
+        for i in sorted(self.visible):
+            p = self.rows[i]["parent_doc_id"]
+            if p:
+                self.children.setdefault(p, []).append(i)
+
+    def crumb(self, doc_id: int) -> dict:
+        d = self.rows.get(doc_id)
+        if not d or doc_id not in self.visible:
+            return {"id": doc_id}
+        return {"id": doc_id, "slug": d["slug"], "title": d["title"]}
+
+    def path(self, doc_id: int) -> list:
+        """Ancestors, root first, not including the doc itself."""
+        out, seen = [], {doc_id}
+        p = (self.rows.get(doc_id) or {}).get("parent_doc_id")
+        while p and p not in seen:
+            seen.add(p)
+            out.append(self.crumb(p))
+            p = (self.rows.get(p) or {}).get("parent_doc_id")
+        return out[::-1]
+
+    def path_text(self, doc_id: int) -> str:
+        """The path as one line, for reading: `Root / Section / This doc`."""
+        names = [c.get("title") or f"#{c['id']}" for c in self.path(doc_id)]
+        return " / ".join(names + [(self.rows.get(doc_id) or {}).get("title") or f"#{doc_id}"])
+
+    def child_count(self, doc_id: int) -> int:
+        return len(self.children.get(doc_id, []))
+
+    def siblings(self, doc_id: int) -> dict:
+        """The previous and next readable doc under the same parent, by id.
+        Root docs have no siblings here: the root is a list, not a section."""
+        p = (self.rows.get(doc_id) or {}).get("parent_doc_id")
+        if not p:
+            return {"previous": None, "next": None}
+        kin = self.children.get(p, [])
+        before = [i for i in kin if i < doc_id]
+        after = [i for i in kin if i > doc_id]
+        return {"previous": self.crumb(before[-1]) if before else None,
+                "next": self.crumb(after[0]) if after else None}
+
+
+_DOC_SORTS = {"updated": ("updated_at", True), "created": ("created_at", True),
+              "title": ("title", False), "id": ("id", False), "children": (None, True)}
+
+
 @app.get("/api/v1/docs")
 def list_docs(kind: str = None, status: str = None, group_scope: str = None,
               linked_ticket: int = None, q: str = None, parent_id: int = None,
+              parent: int = None, root: bool = False, sort: str = "updated",
+              order: str = None, limit: int = 200, offset: int = 0,
               auth: AuthContext = Depends(get_auth)):
     """List docs visible to the caller's scope, optionally filtered. No bodies
-    (those come from GET /docs/{id}); each row carries its links for threading."""
+    (those come from GET /docs/{id}); each row carries its links for threading.
+
+    The tree (#1146): `parent=N` (or `parent_id`) lists one doc's children;
+    `root=true` lists the top level. `sort` is updated (default), created,
+    title, id or children (most children first); `order` is asc or desc.
+    Pages with `limit` (1-500, default 200) and `offset`; `total` counts every
+    match and `next_offset` is null on the last page. Each row carries `path`
+    (its ancestors, root first) and `child_count`."""
+    if sort not in _DOC_SORTS:
+        raise HTTPException(400, f"sort must be one of {', '.join(_DOC_SORTS)}")
+    if order not in (None, "asc", "desc"):
+        raise HTTPException(400, "order must be asc or desc")
+    if parent is not None:
+        parent_id = parent
+    limit = max(1, min(int(limit), 500))
+    offset = max(0, int(offset))
     clauses, params = [], []
+    if root:
+        clauses.append("parent_doc_id IS NULL")
     if kind:
         clauses.append("kind = ?"); params.append(kind)
     if status:
@@ -4806,14 +4882,30 @@ def list_docs(kind: str = None, status: str = None, group_scope: str = None,
     if parent_id is not None:
         clauses.append("parent_doc_id = ?"); params.append(parent_id)
     where = " WHERE " + " AND ".join(clauses) if clauses else ""
-    docs = db.query(f"SELECT * FROM docs{where} ORDER BY updated_at DESC LIMIT 200",
+    docs = db.query(f"SELECT * FROM docs{where} ORDER BY updated_at DESC, id DESC",
                     tuple(params))
     visible = [d for d in docs if _can_see_doc(auth, d)]
-    for d in visible:
+    tree = _DocTree(auth)
+    col, desc = _DOC_SORTS[sort]
+    if order:
+        desc = order == "desc"
+    if col is None:
+        key = lambda d: (tree.child_count(d["id"]), d["id"])
+    elif col == "title":
+        key = lambda d: ((d.get("title") or "").lower(), d["id"])
+    else:
+        key = lambda d: (d.get(col) or "", d["id"])
+    visible.sort(key=key, reverse=desc)
+    page = visible[offset:offset + limit]
+    for d in page:
         d["ref"] = _ref("docs", d["id"], d.get("title"))
         d["links"] = db.query("SELECT target_type, target_id FROM doc_links WHERE doc_id = ?",
                               (d["id"],))
-    return {"docs": visible}
+        d["path"] = tree.path(d["id"])
+        d["child_count"] = tree.child_count(d["id"])
+    nxt = offset + limit
+    return {"docs": page, "total": len(visible), "offset": offset, "limit": limit,
+            "next_offset": nxt if nxt < len(visible) else None}
 
 
 @app.post("/api/v1/docs")
@@ -4890,6 +4982,12 @@ def get_doc(ident: str, rev: int = None, auth: AuthContext = Depends(get_auth)):
         raise HTTPException(404, f"Revision {rev} not found for doc {doc['id']}")
     out = _doc_view(doc, rev=rev)
     out["claims"] = _claims_view(auth.identity(), doc_id=doc["id"])
+    # Where the doc sits (#1146): the full path, root first, and the docs
+    # either side of it under the same parent, so a reader can walk the tree.
+    tree = _DocTree(auth)
+    out["path"] = tree.path(doc["id"])
+    out["path_text"] = tree.path_text(doc["id"])
+    out["siblings"] = tree.siblings(doc["id"])
     return out
 
 
@@ -9310,8 +9408,8 @@ def api_index():
                 "health": {"method": "GET", "path": "/api/v1/wake/health", "auth": "any", "description": "Fleet darkness as a READING, not an inbox message: per-seat dark/reason/since, the everyone-at-once fleet signature, and ?transitions=N of history from the audit log. wake.dark/wake.dark_recovered/wake.dark.fleet are no longer written to anyone's inbox"},
             },
             "docs": {
-                "list": {"method": "GET", "path": "/api/v1/docs", "auth": "any", "description": "Versioned shared-knowledge plane — sibling to tickets (?kind ?status ?group_scope ?linked_ticket ?q)"},
-                "get": {"method": "GET", "path": "/api/v1/docs/{slug|id}", "auth": "any", "description": "Doc + head body + links (?rev=N for a past revision)"},
+                "list": {"method": "GET", "path": "/api/v1/docs", "auth": "any", "description": "Versioned shared-knowledge plane — sibling to tickets (?kind ?status ?group_scope ?linked_ticket ?q). A tree: ?parent=N one section, ?root=true the top level; ?sort=updated|created|title|id|children ?order=asc|desc; paged ?limit (200, max 500) ?offset with total and next_offset. Rows carry path and child_count"},
+                "get": {"method": "GET", "path": "/api/v1/docs/{slug|id}", "auth": "any", "description": "Doc + head body + links, children, path (root first), path_text and siblings (previous/next under the same parent) (?rev=N for a past revision)"},
                 "create": {"method": "POST", "path": "/api/v1/docs", "auth": "any", "description": "Open revision 1; source is bearer-derived and immutable. owner defaults to source; a named owner must be in group_scope (default: your first editable). No group-wide publication notification. Returns thread_id"},
                 "revise": {"method": "POST", "path": "/api/v1/docs/{id}/revisions", "auth": "any", "description": "Edit = a new immutable revision (full body)"},
                 "append": {"method": "POST", "path": "/api/v1/docs/{id}/append", "auth": "any", "description": "Additive edit: append a block without resubmitting the body (saves tokens) — still a revision"},
@@ -9363,7 +9461,7 @@ def api_index():
                 "activate": {"method": "POST", "path": "/api/v1/users/activate", "description": "Consume invite, get permanent token"},
                 "guide": {"method": "GET", "path": "/api/v1/users/me/guide", "auth": "self", "description": "Persistent operations guide"},
                 "briefing": {"method": "GET", "path": "/api/v1/users/me/briefing", "auth": "self", "description": "Personal briefing: unread inbox, blocked-on-you, decision-tagged tasks, pick-me menu, windowed movement"},
-                "search": {"method": "GET", "path": "/api/v1/search", "auth": "any", "description": "Search across planes (#1082): tickets, tasks and docs you can see whose title, body or comments hold every word of ?q (#N matches an id). One filter vocabulary for all: ?kind=ticket,task,doc ?status (comma list; active = open/triaged/in-progress tickets, todo/in-progress/blocked tasks, draft/active docs) ?assignee (:me; a doc's owner) ?group_scope ?tag ?updated_hours ?limit (30, max 100) ?offset. Ranked id > title > body > comment, newest first"},
+                "search": {"method": "GET", "path": "/api/v1/search", "auth": "any", "description": "Search across planes (#1082): tickets, tasks and docs you can see whose title, body or comments hold every word of ?q (#N matches an id). One filter vocabulary for all: ?kind=ticket,task,doc ?status (comma list; active = open/triaged/in-progress tickets, todo/in-progress/blocked tasks, draft/active docs) ?assignee (:me; a doc's owner) ?group_scope ?tag ?updated_hours ?limit (30, max 100) ?offset. Ranked id > title > body > comment, newest first; ?sort=updated for date alone. Doc hits carry path and path_text"},
                 "inbox_feed": {"method": "GET", "path": "/api/v1/inbox/feed", "auth": "self", "description": "The inbox as a feed (#1082): one card per ticket, task or doc, newest activity first, with your read/star state. ?filter=mine (default: addressed to you, assigned or yours) | unread | starred | all; ?kind=ticket,task,doc; ?window_hours (default 168); ?group_scope; ?limit/?offset by card. Reads delivery as it is; changes no one's notifications"},
                 "inbox_marks": {"method": "POST", "path": "/api/v1/inbox/marks", "auth": "self", "description": "{items:[{kind,id}], read?, starred?}: mark feed cards read/unread and starred/unstarred. Reading a card also marks your notification rows for it read"},
                 "inbox_read_all": {"method": "POST", "path": "/api/v1/inbox/read-all", "auth": "self", "description": "Mark the whole feed read: the epoch moves to now, stars stay, your unread notification rows are marked read"},
@@ -11414,7 +11512,8 @@ def _search_kind(kind: str, terms: list[str], statuses, assignee, group_scope, t
 def search(q: str = "", kind: Optional[str] = None, status: Optional[str] = None,
            assignee: Optional[str] = None, group_scope: Optional[str] = None,
            tag: Optional[str] = None, updated_hours: Optional[int] = None,
-           limit: int = 30, offset: int = 0, auth: AuthContext = Depends(get_auth)):
+           limit: int = 30, offset: int = 0, sort: str = "relevance",
+           auth: AuthContext = Depends(get_auth)):
     """Search across planes (#1082): tickets, tasks and docs you can see whose
     title, body or comments hold every word of `q` (case-insensitive; `#1082`
     or `1082` also matches that id). The filters mean the same on every kind:
@@ -11423,7 +11522,11 @@ def search(q: str = "", kind: Optional[str] = None, status: Optional[str] = None
     draft/active docs), `assignee` (a doc's owner; `:me` is you),
     `group_scope`, `tag` (tickets and tasks), `updated_hours`. With no `q`
     it is the same filters over everything, newest first. Ranked: an exact
-    id, then title matches, then body, then comments; newest first within."""
+    id, then title matches, then body, then comments; newest first within.
+    `sort=updated` orders by date alone, newest first (#1146). A doc hit
+    carries `path` (its ancestors, root first) and `path_text`."""
+    if sort not in ("relevance", "updated"):
+        raise HTTPException(400, "sort must be relevance or updated")
     me = auth.identity()
     terms = _search_terms(q)
     kinds = [k.strip() for k in (kind or ",".join(_SEARCH_KINDS)).split(",") if k.strip()]
@@ -11494,11 +11597,18 @@ def search(q: str = "", kind: Optional[str] = None, status: Optional[str] = None
                 "updated_at": r.get("updated_at"), "match": where if terms else None,
                 "snippet": snippet, "_rank": rank if terms else 0,
             })
-    results.sort(key=lambda x: (x["_rank"], _feed_ts(x["updated_at"])), reverse=True)
+    if sort == "updated":
+        results.sort(key=lambda x: _feed_ts(x["updated_at"]), reverse=True)
+    else:
+        results.sort(key=lambda x: (x["_rank"], _feed_ts(x["updated_at"])), reverse=True)
     counts = {k: sum(1 for x in results if x["kind"] == k) for k in kinds}
     page = results[offset:offset + limit]
+    tree = _DocTree(auth) if any(x["kind"] == "doc" for x in page) else None
     for x in page:
         x.pop("_rank", None)
+        if x["kind"] == "doc":
+            x["path"] = tree.path(x["id"])
+            x["path_text"] = tree.path_text(x["id"])
     return {"q": q, "terms": terms, "items": page, "total": len(results), "counts": counts}
 
 

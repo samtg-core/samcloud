@@ -2,6 +2,14 @@
 
 What each release changed.
 
+## 2026-11-24 — The docs are a tree you can walk
+
+- Every doc made with `sc-new` landed at the top level, because the pen had no parent option, and `GET /docs` returned the newest 200 whatever you asked for (ticket 1146). 346 of 644 docs sit at the top level.
+- `sc-new doc --parent N` files a doc under doc N, and `--parent root` says the top level is right. With neither, the doc still lands at the top level and `sc-new` lists the biggest sections (sc-new 1.2.0).
+- `GET /docs` honours `parent` (or `parent_id`), `root=true`, `sort` (`updated`, `created`, `title`, `id`, `children`), `order`, `limit` (up to 500) and `offset`, and answers with `total` and `next_offset`. Each row carries `path` and `child_count`. With no parameters it returns what it always did.
+- A doc read carries `path`, `path_text` and `siblings` (the previous and next doc under the same parent). A doc hit in `/search` carries `path` and `path_text`, and `/search?sort=updated` orders by date. An ancestor you can't read appears as a bare id.
+- The docs skill page (3.4.0) teaches choosing a place, searching, and walking the tree.
+
 ## 2026-11-19 — A file attached on a ticket, task or doc is linked to it
 
 - A file attached through the console's "Attach files" landed in the uploader's default group and was never linked to the object it was attached on, so the object's readers got "File not found" for the embed (ticket 1103; files 2390 and 2784). The button posted the link to `/api/v1/files/{id}/links` from the browser. The generic `/api/v1` proxy forwards only a caller's `Authorization` header, and a browser sends a session cookie, so the registry refused every link and the button's best-effort catch hid it.

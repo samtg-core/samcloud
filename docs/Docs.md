@@ -40,6 +40,7 @@ The dashboard editor saves a whole new body and does not send `base_rev`, so it 
 | `group_scope` | The one group the doc is in. |
 | `current_rev`, `revision_count` | The head revision number, and how many revisions there are. |
 | `parent_doc_id`, `parent`, `children` | The hierarchy. A read returns the parent and the children (id, slug, title, kind, status). |
+| `path`, `path_text`, `siblings` | Where the doc sits, on a read. `path` is its ancestors, root first; `path_text` is the same as one line, `Root / Section / This doc`; `siblings` holds the `previous` and `next` doc under the same parent, by id. An ancestor you can't read appears as a bare `{"id": N}`. |
 | `supersedes` | The doc this one replaces. |
 | `links` | What the doc is linked to. |
 | `comments` | The discussion, each with `author`, `body`, and the writer's `session_fp` and `home_thread_id`. |
@@ -141,15 +142,19 @@ curl -s -H @"$H" -X DELETE "$API/docs/375/links/{link_id}"
 ```bash
 curl -s -H @"$H" "$API/docs?q=installer"             # title or slug contains
 curl -s -H @"$H" "$API/docs?kind=runbook&status=active"
-curl -s -H @"$H" "$API/docs?parent_id=175"           # the children of 175
-curl -s -H @"$H" "$API/docs/installer-design"        # by slug: body, links, children, comments
+curl -s -H @"$H" "$API/docs?parent=175"              # the children of 175
+curl -s -H @"$H" "$API/docs?root=true&sort=children" # the top level, biggest sections first
+curl -s -H @"$H" "$API/docs/installer-design"        # by slug: body, path, links, children, comments
+curl -s -H @"$H" "$API/search?q=installer&kind=doc"  # words in the title, body or comments
 ```
 
-The list filters are `q`, `kind`, `status`, `group_scope`, `linked_ticket` and `parent_id`. It returns at most 200 docs, most recently updated first, without bodies; each row carries its links.
+The list filters are `q` (title or slug), `kind`, `status`, `group_scope`, `linked_ticket`, `parent` (or `parent_id`) and `root=true`. `sort` is `updated` (the default), `created`, `title`, `id` or `children`, and `order` is `asc` or `desc`. It pages with `limit` (default 200, at most 500) and `offset`, and answers with `total` and `next_offset` (null on the last page). Rows have no bodies; each carries its links, `path` and `child_count`.
+
+`/search` reads bodies and comments as well as titles, and each doc hit carries `path` and `path_text`. `sort=updated` orders hits by date instead of by match.
 
 ### Nest a doc
 
-`parent_doc_id` makes a doc a child of another, so an overview doc is a live index of its parts. Set it on create, or change it with `PATCH /docs/{id} {"parent_doc_id": 175}`; `0` clears it. A doc cannot be its own parent, and a change that would make a cycle answers `400`.
+`parent_doc_id` makes a doc a child of another, so an overview doc is a live index of its parts. Set it on create (`sc-new doc --parent 175`), or change it with `PATCH /docs/{id} {"parent_doc_id": 175}`; `0` clears it. A doc cannot be its own parent, and a change that would make a cycle answers `400`.
 
 ## Retire or supersede a doc
 

@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# NEW_VERSION: 1.1.0
+# NEW_VERSION: 1.2.0
 # Served as GET /api/v1/helpers/new. Install from the plane you write to:
 #   curl -s -H @"$HOME/.samcloud/__TOKEN_HDR__" __API__/helpers/new > ~/.local/bin/sc-new && chmod +x ~/.local/bin/sc-new
 # sc-new — samcloud CREATE primitive. The sibling of sc-say, which is comment-only.
@@ -11,13 +11,17 @@
 #
 #   sc-new ticket --summary "the gate misses four helpers" --assignee admin < body.md
 #   echo "detail" | sc-new task --project scope-next-run --title "re-run the breadth"
-#   sc-new doc --title "Run record" -f record.md
+#   sc-new doc --title "Run record" --parent 455 -f record.md
 #   sc-new ticket --summary "probe" --dry            # show what would be sent, send nothing
 #
 # Every create joins a thread; none starts a second one (#886). Which one:
 #   --thread N  >  $SAMCLOUD_THREAD_ID  >  the plane's rule: a subtask's parent,
 #   the thread your holder holds, your conversation's own thread (its first
 #   create started it).
+#
+# A doc sits in the tree (#1146). --parent N files it under doc N; --parent root
+# says it belongs at the top level. With neither, it still lands at the root,
+# and sc-new lists the biggest sections so the next one can go where it belongs.
 #
 # Plane and auth are resolved exactly as sc-say does (see its header). The bearer
 # never touches argv: a header file rides `curl -H @file`, a raw token goes via
@@ -30,7 +34,7 @@ prog=${0##*/}
 die() { printf '%s: %s\n' "$prog" "$1" >&2; exit "${2:-1}"; }
 
 kind=""; summary=""; project=""; assignee=""; ttype=""; priority=""
-group=""; file=""; plane=""; hdr=""; thread=""; dry=0
+group=""; file=""; plane=""; hdr=""; thread=""; dry=0; parent=""
 while [ $# -gt 0 ]; do
   case "$1" in
     ticket|doc|task)   kind="$1"; shift ;;
@@ -41,18 +45,21 @@ while [ $# -gt 0 ]; do
     --priority)        priority="${2:-}"; shift 2 || die "missing value after --priority" 2 ;;
     --group)           group="${2:-}"; shift 2 || die "missing group after --group" 2 ;;
     --thread|-t)       thread="${2:-}"; shift 2 || die "missing id after --thread" 2 ;;
+    --parent)          parent="${2:-}"; shift 2 || die "missing id after --parent" 2 ;;
     --no-thread)       die "--no-thread is gone (#886): what a conversation makes joins its own thread. Name one with --thread N" 2 ;;
     -f|--file)         file="${2:-}"; shift 2 || die "missing path after -f" 2 ;;
     --plane)           plane="${2:-}"; shift 2 || die "missing value after --plane" 2 ;;
     --hdr)             hdr="${2:-}"; shift 2 || die "missing path after --hdr" 2 ;;
     --dry|-n)          dry=1; shift ;;
-    -h|--help)         sed -n '2,28p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
+    -h|--help)         sed -n '2,30p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
     *) die "unknown argument '$1' (try --help)" 2 ;;
   esac
 done
 [ -n "$kind" ] || die "usage: $prog {ticket|doc|task} --summary TEXT [--thread N] [-f FILE]" 2
 [ -n "$summary" ] || die "a $kind needs --summary (or --title)" 2
 [ "$kind" = "task" ] && [ -z "$project" ] && die "a task needs --project <slug>" 2
+[ -n "$parent" ] && [ "$kind" != "doc" ] && die "--parent is for docs; a subtask's parent is the task API's parent_task_id" 2
+case "$parent" in ""|root) ;; (*[!0-9]*) die "--parent must be a doc id or 'root', got '$parent'" 2 ;; esac
 
 # ── plane (identical precedence to sc-say) ────────────────────────────────────
 tokf="${SAMCLOUD_TOKEN_FILE:-$HOME/.samcloud/token}"
@@ -108,7 +115,7 @@ case "$kind" in
 esac
 
 payload=$(KIND="$kind" SUMMARY="$summary" BODY="$body" ASSIGNEE="$assignee" \
-          TTYPE="$ttype" PRIORITY="$priority" GROUP="$group" python3 -c '
+          TTYPE="$ttype" PRIORITY="$priority" GROUP="$group" PARENT="$parent" python3 -c '
 import json, os, sys
 k = os.environ["KIND"]; body = os.environ["BODY"]
 d = {}
@@ -118,6 +125,7 @@ if k == "ticket":
     if os.environ["TTYPE"]: d["type"] = os.environ["TTYPE"]
 elif k == "doc":
     d["title"] = os.environ["SUMMARY"]; d["body"] = body
+    if os.environ["PARENT"] not in ("", "root"): d["parent_doc_id"] = int(os.environ["PARENT"])
 else:
     d["title"] = os.environ["SUMMARY"]
     if body: d["detail"] = body
@@ -176,3 +184,28 @@ elif asked:
     line += " (asked for thread %s; the response does not say which it used)" % asked
 print(line)
 '
+
+# A doc made with no --parent lands at the root. Say so, and show where it
+# could go: the sections with the most docs under them (#1146).
+if [ "$kind" = "doc" ] && [ -z "$parent" ]; then
+  if [ -n "$authhdr" ]; then
+    secs=$(curl -sS -H @"$authhdr" "$api/docs?root=true&sort=children&limit=20" 2>/dev/null)
+  else
+    secs=$(curl -sS --config <(printf 'header = "Authorization: Bearer %s"\n' "$(cat "$tokf")") \
+             "$api/docs?root=true&sort=children&limit=20" 2>/dev/null)
+  fi
+  SECS="$secs" python3 -c '
+import json, os, sys
+try:
+    rows = [d for d in json.loads(os.environ["SECS"]).get("docs", []) if d.get("child_count")]
+except Exception:
+    rows = []
+w = sys.stderr.write
+w("sc-new: this doc is at the root. Next time pass --parent N, or --parent root if the root is right.\n")
+if rows:
+    w("sc-new: the biggest sections (id, docs under it, title); GET /docs?parent=N shows one:\n")
+    for d in rows:
+        w("  %6s  %3s  %s\n" % (d["id"], d["child_count"], d.get("title") or ""))
+w("sc-new: to move this one, its owner can PATCH /docs/{id} {\"parent_doc_id\": N}.\n")
+' || true
+fi
