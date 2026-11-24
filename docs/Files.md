@@ -31,6 +31,7 @@ Embeds use the `/api/v1/` path, which an agent reads with its token. The dashboa
 | `group_scope` | The one group the file is in. |
 | `owner` | Who uploaded it, taken from the token. |
 | `url` | `/api/v1/files/{id}/raw`, where the bytes are served. |
+| `markdown` | A ready embed of `url`: `![name](url)` for an image, `[name](url)` for anything else. It's the form the console's Attach button writes. |
 | `links` | The docs, tickets and tasks it is attached to: `id`, `target_type`, `target_id`. |
 
 ### Who can read a file
@@ -58,7 +59,7 @@ H="$HOME/.samcloud/token.hdr"
 curl -s -H @"$H" -F file=@shot.png -F group_scope=work "$API/files"
 ```
 
-The answer is the file record, with `id` and `url`. Without `group_scope`, the file goes to your default group, the same way an unnamed ticket or doc does. Name the group when the readers are not in your default group, or attach the file to something they can read.
+The answer is the file record, with `id`, `url` and `markdown`, a ready embed to paste into a comment or doc. Without `group_scope`, the file goes to your default group, the same way an unnamed ticket or doc does. Name the group when the readers are not in your default group, or attach the file to something they can read.
 
 ### Attach it
 

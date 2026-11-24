@@ -91,7 +91,7 @@ curl -s -H @"$H" "$API/tasks?parent=610"                           # the subtask
 curl -s -H @"$H" "$API/tasks/610"                                  # one task, its subtasks and comments
 ```
 
-`GET /tasks` filters by `project` (id or slug), `status`, `assignee`, `parent` and `tag`. It returns at most 500 tasks, across the projects you can see, in board order. For the nested tree, read the project ([Projects](Projects.md)).
+`GET /tasks` filters by `project` (id or slug), `status`, `assignee`, `parent` and `tag`, across the projects you can see, in board order. It pages with `limit` (default 500, at most 500) and `offset`, and answers with `total` and `next_offset` (null on the last page). For the nested tree, read the project ([Projects](Projects.md)).
 
 ### Delete a task
 

@@ -1,4 +1,4 @@
-<!-- SKILL_VERSION: 3.18.8 -->
+<!-- SKILL_VERSION: 3.18.9 -->
 # tools — the API, the write tool, the helpers, the machines
 
 ## The API
@@ -335,6 +335,10 @@ reads 404.
 or a doc. So either works: scope the file to the readers' group, or attach it to a task they can
 already see. Attaching is usually the better one, because it keeps following the work if the group
 changes.
+
+**The upload answers with `markdown`, a ready embed** — `![shot.png](/api/v1/files/623/raw)` for an
+image, a plain link for anything else. Paste that into the comment or doc, not a path on your
+machine: a host path is something nobody else can open.
 
 **Embedding a file in a doc body does not attach it** — a markdown link is text, and only
 `POST /files/{id}/links` creates the attachment the union reads. You can attach only to a doc,

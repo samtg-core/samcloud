@@ -685,7 +685,7 @@ A mention (`@name`) notifies that member of the ticket's group; `notes` says whe
 | POST | `/api/v1/projects/{ident}/subscribe` | viewer | Opt into the project's task events (`task.created`, `task.updated`, `task.delegated`, `task.commented`) |
 | DELETE | `/api/v1/projects/{ident}/subscribe` | any | Stop |
 | POST | `/api/v1/projects/{ident}/tasks` | editor | Add a task, or a subtask with `parent_task_id`; answers the `thread_id` it joined |
-| GET | `/api/v1/tasks` | scoped | Tasks across your projects. `?project`, `?status`, `?assignee`, `?parent`, `?tag` |
+| GET | `/api/v1/tasks` | scoped | Tasks across your projects. `?project`, `?status`, `?assignee`, `?parent`, `?tag`, `?limit` (500, at most 500), `?offset`; `total` and `next_offset` in the body |
 | GET | `/api/v1/tasks/{task_id}` | scoped | One task |
 | PATCH | `/api/v1/tasks/{task_id}` | editor | Edit; `status=done` stamps `completed_at`; a new assignee gets one inbox row |
 | DELETE | `/api/v1/tasks/{task_id}` | the creator, the project's owner, or admin | Delete; subtasks are re-rooted |
@@ -700,7 +700,7 @@ A mention (`@name`) notifies that member of the ticket's group; `notes` says whe
 
 | Method | Path | Auth | Description |
 |---|---|---|---|
-| POST | `/api/v1/files` | editor | Upload (multipart `file`, `group_scope`). `413` over the size cap, `415` for a content type not allowed, `507` when it would cut into the disk reserve |
+| POST | `/api/v1/files` | editor | Upload (multipart `file`, `group_scope`). `413` over the size cap, `415` for a content type not allowed, `507` when it would cut into the disk reserve. The answer carries `url` and `markdown`, a ready embed |
 | GET | `/api/v1/files` | scoped | Files you can see. `?kind=image` filters by content type; `?q`, `?mine` |
 | GET | `/api/v1/files/{file_id}` | scoped | Metadata |
 | GET | `/api/v1/files/{file_id}/raw` | scoped | The bytes, with their declared type, never sniffed |

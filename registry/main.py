@@ -5687,9 +5687,14 @@ def create_task(ident: str, req: ProjectTaskCreate, auth: AuthContext = Depends(
 
 @app.get("/api/v1/tasks")
 def list_tasks(project: str = None, status: str = None, assignee: str = None,
-               parent: int = None, tag: str = None,
+               parent: int = None, tag: str = None, limit: int = 500, offset: int = 0,
                auth: AuthContext = Depends(get_auth)):
-    """Flat task list across visible projects (?project= id|slug ?status ?assignee ?parent ?tag)."""
+    """Flat task list across visible projects (?project= id|slug ?status ?assignee ?parent ?tag).
+    Paged over visible tasks (#1146): ?limit (default 500, max 500) and
+    ?offset; `total` counts every match and `next_offset` is null on the last
+    page. It used to stop at the lowest 500 ids, whatever was asked."""
+    limit = max(1, min(int(limit), 500))
+    offset = max(0, int(offset))
     clauses, params = [], []
     if project:
         p = _resolve_project(project)
@@ -5707,7 +5712,7 @@ def list_tasks(project: str = None, status: str = None, assignee: str = None,
         clauses.append("t." + c); params.append(p2)
     where = " WHERE " + " AND ".join(clauses) if clauses else ""
     rows = db.query(f"SELECT t.* FROM tasks t{where} "
-                    "ORDER BY (t.position IS NULL), t.position, t.id LIMIT 500",
+                    "ORDER BY (t.position IS NULL), t.position, t.id",
                     tuple(params))
     # Scope-filter through each task's parent project (cached per project).
     seen: dict[int, bool] = {}
@@ -5718,9 +5723,14 @@ def list_tasks(project: str = None, status: str = None, assignee: str = None,
             proj = db.query_one("SELECT * FROM projects WHERE id = ?", (pid,))
             seen[pid] = bool(proj) and _can_see_project(auth, proj)
         if seen[pid]:
-            t["ref"] = _ref("tasks", t["id"], t.get("title"))
-            out.append(_row_tags(t))
-    return {"tasks": out}
+            out.append(t)
+    page = out[offset:offset + limit]
+    for t in page:
+        t["ref"] = _ref("tasks", t["id"], t.get("title"))
+        _row_tags(t)
+    nxt = offset + limit
+    return {"tasks": page, "total": len(out), "offset": offset, "limit": limit,
+            "next_offset": nxt if nxt < len(out) else None}
 
 
 @app.get("/api/v1/tasks/{task_id}")
@@ -9445,6 +9455,16 @@ def api_index():
                 "subscribe": {"method": "POST", "path": "/api/v1/docs/{id}/subscribe", "auth": "any", "description": "Explicitly opt into comments and record changes (updates=1); participation alone receives comments"},
                 "unsubscribe": {"method": "DELETE", "path": "/api/v1/docs/{id}/subscribe", "auth": "any"},
             },
+            "files": {
+                "upload": {"method": "POST", "path": "/api/v1/files", "auth": "any", "description": "Multipart upload (file, group_scope). Owner is bearer-derived. The answer carries url and markdown, a ready embed to paste into a ticket, task or doc"},
+                "list": {"method": "GET", "path": "/api/v1/files", "auth": "any", "description": "Files you can see, newest first (?kind=image ?q=name ?mine=true); each with url and markdown"},
+                "get": {"method": "GET", "path": "/api/v1/files/{id}", "auth": "any"},
+                "raw": {"method": "GET", "path": "/api/v1/files/{id}/raw", "auth": "any", "description": "The bytes, with their declared type"},
+                "update": {"method": "PATCH", "path": "/api/v1/files/{id}", "auth": "owner", "description": "Re-scope a file (group_scope)"},
+                "delete": {"method": "DELETE", "path": "/api/v1/files/{id}", "auth": "owner"},
+                "link": {"method": "POST", "path": "/api/v1/files/{id}/links", "auth": "any", "description": "Attach to a ticket, task or doc, so that object's readers can open it"},
+                "unlink": {"method": "DELETE", "path": "/api/v1/files/{id}/links/{link_id}", "auth": "linker/owner"},
+            },
             "tasks": {
                 "projects": {"method": "GET", "path": "/api/v1/projects", "auth": "any", "description": "Task plane — projects with computed progress rollups (?status ?group_scope). doc=record, ticket=request, task=actionable item"},
                 "project": {"method": "GET", "path": "/api/v1/projects/{slug|id}", "auth": "any", "description": "Project + rollup + full nested task tree"},
@@ -9452,7 +9472,7 @@ def api_index():
                 "update_project": {"method": "PATCH", "path": "/api/v1/projects/{slug|id}", "auth": "owner"},
                 "delete_project": {"method": "DELETE", "path": "/api/v1/projects/{slug|id}", "auth": "owner", "description": "Permanent — prefer PATCH status=archived"},
                 "create": {"method": "POST", "path": "/api/v1/projects/{slug|id}/tasks", "auth": "any", "description": "Add a task (parent_task_id for a subtask — it joins the parent's thread). Answers with the thread_id it joined or started"},
-                "list": {"method": "GET", "path": "/api/v1/tasks", "auth": "any", "description": "Flat list across visible projects (?project ?status ?assignee ?parent)"},
+                "list": {"method": "GET", "path": "/api/v1/tasks", "auth": "any", "description": "Flat list across visible projects (?project ?status ?assignee ?parent ?tag). Paged: ?limit (default 500, max 500) + ?offset; total and next_offset in the body"},
                 "get": {"method": "GET", "path": "/api/v1/tasks/{id}", "auth": "any"},
                 "update": {"method": "PATCH", "path": "/api/v1/tasks/{id}", "auth": "any", "description": "Edit — open to project scope; status=done stamps completed_at; a new parent_task_id moves the task into the parent's thread (notes says when it stays)"},
                 "delete": {"method": "DELETE", "path": "/api/v1/tasks/{id}", "auth": "creator/owner"},
@@ -13485,6 +13505,12 @@ def _can_see_file(auth: AuthContext, f: dict) -> bool:
 def _file_view(f: dict) -> dict:
     f = dict(f)
     f["url"] = f"/api/v1/files/{f['id']}/raw"
+    # A ready embed (#1146): the same canonical bearer-auth form the console's
+    # Attach button writes, so a seat pastes it instead of a host path. An
+    # image renders; anything else is a link.
+    label = (f.get("name") or f"file {f['id']}").replace("[", "(").replace("]", ")")
+    bang = "!" if (f.get("content_type") or "").startswith("image/") else ""
+    f["markdown"] = f"{bang}[{label}]({f['url']})"
     f["links"] = db.query(
         "SELECT id, target_type, target_id FROM file_links WHERE file_id = ?", (f["id"],))
     return f

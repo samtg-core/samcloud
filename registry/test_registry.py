@@ -7097,6 +7097,35 @@ class _Uploads:
         return list(self.root.glob(".incoming-*"))
 
 
+class TestPlaneShape(_Uploads):
+    """Small gaps a seat hit reading the plane (#1146): an upload answers with
+    a ready embed, /files is in the index, and /tasks pages."""
+
+    def test_an_upload_answers_with_a_ready_embed(self, client):
+        img = self._upload(client, b"\x89PNG\r\n\x1a\n", name="shot [1].png", ctype="image/png").json()
+        assert img["markdown"] == f"![shot (1).png](/api/v1/files/{img['id']}/raw)"
+        ply = self._upload(client, b"ply\n", name="capture.ply").json()
+        assert ply["markdown"] == f"[capture.ply](/api/v1/files/{ply['id']}/raw)"
+        listed = {f["id"]: f["markdown"] for f in client.get("/api/v1/files").json()["files"]}
+        assert listed[img["id"]] == img["markdown"]
+
+    def test_files_are_in_the_index(self, client):
+        files = client.get("/api/v1/").json()["endpoints"]["files"]
+        assert files["upload"]["path"] == "/api/v1/files" and files["upload"]["method"] == "POST"
+        assert "markdown" in files["upload"]["description"]
+
+    def test_tasks_page_past_the_first_limit(self, client):
+        slug = client.post("/api/v1/projects", json={"name": "paging proj"}).json()["slug"]
+        ids = [client.post(f"/api/v1/projects/{slug}/tasks", json={"title": f"t{i}"}).json()["id"]
+               for i in range(5)]
+        p1 = client.get(f"/api/v1/tasks?project={slug}&limit=2").json()
+        assert [t["id"] for t in p1["tasks"]] == ids[:2]
+        assert p1["total"] == 5 and p1["next_offset"] == 2
+        p3 = client.get(f"/api/v1/tasks?project={slug}&limit=2&offset=4").json()
+        assert [t["id"] for t in p3["tasks"]] == ids[4:] and p3["next_offset"] is None
+        assert isinstance(p3["tasks"][0]["tags"], list)
+
+
 class TestFileUploadCap(_Uploads):
     def test_the_generic_binary_type_is_not_the_strictest_tier(self):
         """A Gaussian splat (.ply) is application/octet-stream to every browser,
