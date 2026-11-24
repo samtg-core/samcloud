@@ -8,6 +8,7 @@ What each release changed.
 - **A service token leases its own device's compute, as itself.** It sees and leases the resources of the device its service runs on; the lease's holder and `service_id` are the service. It sees no other device, and naming another service is `403`.
 - **Caller grants.** `POST /grants {service_id, group_scope, ttl_s}` lets one service upload into one group the caller edits, until it expires. The service sends `grant=` with its own token on `POST /files`; the file is the caller's (`owner`), and `uploaded_by` names the service. Only a hash is kept. A grant is refused for another bearer, after expiry or revocation, or once its caller no longer edits the group. `GET /grants` and `DELETE /grants/{id}` list and end them.
 - `tools.md` (skill 3.21.0): "Find and call a service" says how a caller gets results and mints a grant; "Register a service" says how a service leases, uses a grant, and returns results through its own API. `queue.md` (3.13.2) points to both. Files, Identity and Access, and Compute Resources and Leases say the same. The API map lists `/grants`.
+- `tools.md` (skill 3.21.1): a service that leases through compute-jobs sets `service` to its service id, or compute-jobs refuses its own lease (found by wafer-unity running scene-render with a grant, task 1450).
 
 ## 2026-11-24 — The skill covers enrolment and identities; the API index lists every route
 
