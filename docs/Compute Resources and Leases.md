@@ -59,6 +59,7 @@ A resource, and its leases, are visible when its device is visible to you ([Devi
 |---|---|
 | Anyone who can see the device | read the resource and its queue, request a lease |
 | The device's manager: a token with `device:<id>`, an editor or owner of a group that holds the device, the admin | register a resource, push stats, change status, specs, model and expiry policy, roll a lease over |
+| A service token, for the resources of its own service's device | read them and lease them, as that service: `service_id` defaults to it, and naming another service is `403` |
 | The lease's holder, the admin | renew, release, settle |
 | The admin, the device's own token | delete the resource and its leases |
 

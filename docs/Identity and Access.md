@@ -178,7 +178,7 @@ The registry answers one question for every list, read, write and delivery: "may
 | a member of `home` | the devices in `home`, their services and resources, and `home`'s tickets, docs, projects, tasks and files |
 | a member of `home` and `work` | the union of both |
 | `device:box-1` | box-1, its services and its resources |
-| a service token | its own service |
+| a service token | its own service, and the resources of its own service's device, which it leases as that service |
 
 - **Every route takes a bearer**, except the public ones in [Security](Security.md#what-answers-without-a-token). `GET /setup/status` (is the plane initialised) is the one unauthenticated fact about users.
 - **A read of one object is gated like its list.** A device, service, group or work object outside your scope answers 404: hidden, not refused, so nothing is inferred from outside.

@@ -45,6 +45,10 @@ def _migrate(conn):
         for name, typ in (("session_fp", "TEXT"), ("home_thread_id", "INTEGER")):
             if name not in cols:
                 conn.execute(f"ALTER TABLE {table} ADD COLUMN {name} {typ}")
+    # Doc 752: a file a service uploaded on its caller's grant names the service.
+    cols = {r["name"] for r in conn.execute("PRAGMA table_info(files)")}
+    if "uploaded_by" not in cols:
+        conn.execute("ALTER TABLE files ADD COLUMN uploaded_by TEXT")
     conn.commit()
     columns = {row["name"] for row in conn.execute("PRAGMA table_info(devices)").fetchall()}
 
