@@ -627,11 +627,12 @@ def interrupted_note(c, a, job, poll, grant):
     SIGHUP with it (a closing terminal, a supervisor, timeout) means sc-job is being shut down,
     perhaps with no one to read the hint: that wins, and the grant is revoked as for SIGTERM alone.
     It is decided once, and what is printed holds: the stops are blocked first, so one that comes
-    after the decision stays blocked and is dropped at exit."""
+    after the decision stays blocked and is dropped at exit. A stop delivered before that has
+    already run its handler: CPython re-arms its signal check when the Ctrl-C handler raises, and
+    runs the next due handler on entry to this function."""
     stops = {s for s in (getattr(signal, n, None) for n in ("SIGTERM", "SIGHUP"))
              if s is not None and signal.getsignal(s) != signal.SIG_IGN}
     signal.pthread_sigmask(signal.SIG_BLOCK, stops)
-    _settle()                               # a stop already delivered runs its handler here
     pending = sorted(stops & signal.sigpending())
     stop = _SIGNALS["stop"] or (signal.Signals(pending[0]).name if pending else None)
     if stop:
@@ -639,12 +640,6 @@ def interrupted_note(c, a, job, poll, grant):
     else:
         kept_note(c, a, job, poll, grant, "stopped waiting")
 
-
-def _settle():
-    """CPython runs a Python-level signal handler that is due at the next function entry or loop
-    jump: this is one of each."""
-    for _ in range(2):
-        pass
 
 
 def cmd_call(c, a):
@@ -721,7 +716,7 @@ def cmd_fetch(c, a):
 
 def cmd_list(c, a):
     rows = c.call("GET", f"{c.api}/services")
-    for s in rows if isinstance(rows, list) else rows.get("services", []):
+    for s in rows:                          # the plane answers a bare list (list_services)
         desc = re.split(r"(?<=[.!?])\s|\n", clean(s.get("description") or "", 2000).strip(), maxsplit=1)[0][:120]
         url = s.get("external_url")
         where = clean(url, 120) if callable_url(url) else \
