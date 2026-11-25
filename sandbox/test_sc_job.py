@@ -136,6 +136,17 @@ class Plane(Base):
             if fid == "103":
                 return self.send(200, {"id": 103, "name": "x.png", "content_type": "image/png",
                                        "markdown": "![x](https://elsewhere.example/x.png)"})
+            plane_md = {"104": "![\x1b[31mred](/api/v1/files/104/raw)",      # its own, but not printable
+                        "105": "![" + "a" * 400 + "](/api/v1/files/105/raw)",  # its own, but too long
+                        "106": "![Contact sheet](/api/v1/files/106/raw)"}       # its own, and not what sc-job builds
+            names = {"104": "c.png", "105": "l.png", "106": "s.png", "107": "a\x1b[31mb\x07c.png", "108": "x[1].png"}
+            if fid in names:
+                f = {"id": int(fid), "name": names[fid], "content_type": "text/plain" if fid == "108" else "image/png"}
+                if fid in plane_md:
+                    f["markdown"] = plane_md[fid]
+                return self.send(200, f)
+            if 200 <= int(fid) < 300:
+                return self.send(200, {"id": int(fid), "name": f"n{fid}.json", "content_type": "application/json"})
             return self.send(200, {"id": int(fid), "content_type": "application/json"})
         return self.send(404, {"detail": f"plane has no {method} {p}"})
 
@@ -152,7 +163,7 @@ class Plane(Base):
 SCENARIOS = {"ok": "J1", "fail": "J2", "escape": "J3", "redirect": "J4", "cancel": "J5", "link": "J6",
              "blips": "J7", "slow": "J8", "odd": "J9", "canceled": "J10", "flaky": "J11", "apiredir": "J13",
              "rate": "J14", "truncated": "J15", "lost404": "J16", "lost": "J17", "nostatus": "J18", "unicode": "J19",
-             "echo": "J20", "leaky": "J38", "leakyfail": "J39", "busy": "J21", "stuck": "J22", "longrun": "J23", "blank": "J24", "error": "J25",
+             "echo": "J20", "leaky": "J38", "leakyfail": "J39", "embeds": "J40", "many": "J41", "busy": "J21", "stuck": "J22", "longrun": "J23", "blank": "J24", "error": "J25",
              "big": "J27", "chunked": "J28", "shortbig": "J29", "dropdl": "J30", "truncdl": "J31",
              "resetdl": "J32", "slowdl": "J33", "patchy": "J34", "mixed": "J35", "list": "J36",
              "inching": "J37"}
@@ -226,6 +237,11 @@ def job_doc(job, n):
         return {"job": job, "stage": f"frame {n}"}
     if job == "J25":
         return {"job": job, "status": "error", "error": "out of memory"}
+    if job == "J40":
+        return {"job": job, "status": "done", "results": [],
+                "plane_files": {"ctl": 104, "long": 105, "own": 106, "dirty": 107, "brackets": 108}}
+    if job == "J41":
+        return {"job": job, "status": "done", "results": [], "plane_files": {f"f{i:02d}": 200 + i for i in range(26)}}
     if job in ("J38", "J39"):                     # the grant it was given, echoed wherever sc-job prints
         grant = (S.bodies.get(job) or {}).get("grant", "")
         if job == "J39":
@@ -583,6 +599,25 @@ def main():
     check("progress goes to stderr, not stdout", "waiting" in r.stderr and "waiting" not in r.stdout, r.stderr)
     check("the bearer reached the plane and the service", all(a == TOKEN for _m, _p, a, _b in S.plane + S.service))
     check("the bearer is never printed", "sc-job-test-token" not in r.stdout + r.stderr)
+
+    r = run(["call", "dev/render", "/render", '{"scenario":"embeds"}', "--out", "o-embeds"], tmp)
+    check("the plane's own markdown is used when it differs from what sc-job would build",
+          "  own 106  ![Contact sheet](/api/v1/files/106/raw)" in r.stdout, r.stdout)
+    check("the plane's markdown is not used when it holds an escape sequence",
+          "  ctl 104  ![c.png](/api/v1/files/104/raw)" in r.stdout and "\x1b" not in r.stdout, repr(r.stdout))
+    check("... nor when it is longer than 300 characters",
+          "  long 105  ![l.png](/api/v1/files/105/raw)" in r.stdout and "aaaa" not in r.stdout, r.stdout)
+    check("a file name is cleaned of escape sequences and control characters",
+          "  dirty 107  ![ab c.png](/api/v1/files/107/raw)" in r.stdout, repr(r.stdout))
+    check("brackets in a name become parentheses, and a non-image gets a plain link",
+          "  brackets 108  [x(1).png](/api/v1/files/108/raw)" in r.stdout, r.stdout)
+    before = len(S.plane)
+    r = run(["call", "dev/render", "/render", '{"scenario":"many"}', "--out", "o-many"], tmp)
+    looked = [p_ for m_, p_, _a, _b in S.plane[before:] if m_ == "GET" and p_.startswith("/api/v1/files/2")]
+    check("of 26 plane files, the first 24 are looked up and the rest get a link built from their role",
+          len(looked) == 24 and "  f23 223  [n223.json](/api/v1/files/223/raw)" in r.stdout
+          and "  f24 224  [f24](/api/v1/files/224/raw)" in r.stdout and "  f25 225  [f25](/api/v1/files/225/raw)" in r.stdout,
+          (len(looked), r.stdout[-300:]))
 
     print("sc-job — the grant on every way out")
     for scenario, code, what in (("fail", 1, "failed"), ("cancel", 1, "cancelled"), ("submit500", 2, "the submit failed")):
