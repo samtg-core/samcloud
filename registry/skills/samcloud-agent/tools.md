@@ -340,10 +340,11 @@ In each entry of `GET /services`:
 curl -s -H @"$HOME/.samcloud/token.hdr" __API__/helpers/job > ~/.local/bin/sc-job && chmod +x ~/.local/bin/sc-job
 sc-job list                                                     the services you can call
 sc-job call wafer-services/scene-render /render '{"scene":"<id>","mode":"quick"}' --store <plane group>
+sc-job fetch wafer-services/scene-render <job>                  wait for a job you already submitted, then download it
 sc-job status wafer-services/scene-render <job>  ·  sc-job cancel wafer-services/scene-render <job>
 ```
 
-It downloads into `./<job>/` and prints the files, the plane file ids by role, and a line to embed the first image. It exits 0 when the job is `done`, 1 when it `failed` or was `cancelled`, and 2 when a call was refused.
+It waits through dropped connections and 5xx answers. It downloads into `./<job>/` and prints the files, the plane file ids by role, and a line to embed the first image. If you stop it with Ctrl-C, the job carries on and the grant stays live until its ttl; it prints the `sc-job fetch` line to resume and the call to revoke. Exit: 0 done; 1 failed/cancelled/expired; 2 usage, HTTP or interrupted.
 
 The service runs the job under its own lease. It posts nothing on the plane for you.
 

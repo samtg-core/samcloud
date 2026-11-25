@@ -135,7 +135,7 @@ All served by the registry at `GET /api/v1/helpers/{name}`. The stamped ones upd
 | `samcloud-new` (`sc-new`) | `/helpers/new` | the **create** pen: a ticket, task or doc made *into* a thread |
 | `samcloud-edit` (`sc-edit`) | `/helpers/edit` | the **revise** pen: changes a doc body with a compare-and-set ([Docs](Docs.md)) |
 | `samcloud-pr.py` (`sc-pr`) | `/helpers/pr` | the **contribute** pen: pushes a branch and opens a pull request on samcloud's code ([Contributing](Contributing.md)) |
-| `samcloud-job` (`sc-job`) | `/helpers/job` | the **service caller**: submits a job to a registered service, waits for it, downloads what it made, and with `--store` keeps it as plane files the caller owns, through a grant it mints and revokes |
+| `samcloud-job` (`sc-job`) | `/helpers/job` | the **service caller**: submits a job to a registered service, waits for it, downloads what it made, and with `--store` keeps it as plane files the caller owns, through a grant it mints and revokes; `sc-job fetch` resumes a job it stopped waiting for |
 | `samcloud-scope-check.py` | `/helpers/scope-check` | the seat's expected-against-actual scope check |
 | `samcloud-wsl-boot.ps1` | `/helpers/wsl-boot` | the Windows (WSL) boot chain: distro, systemd, dockerd, port proxy, keepalive |
 | `wake-install.sh` | `/helpers/wake-install` | puts the rail on a seat: the listener, the rail, the pens, `wake.env`, the header file, the ground-truth charter, and supervision. A seat runs it once; the listener then keeps the stamped files current |

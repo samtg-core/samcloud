@@ -7,21 +7,30 @@
     sc-job list                                         services you can see: id, health, address, what it does
     sc-job call <service id> <submit path> [BODY] [--store GROUP] [--ttl S] [--out DIR] [--no-wait] [--json]
                                                         BODY is JSON, @file or - (stdin); default {}
-    sc-job status <service id> <job> [--poll PATH]      the job as the service reports it
-    sc-job cancel <service id> <job> [--poll PATH]      withdraw a queued job, or delete a finished one
+    sc-job fetch <service id> <job> [--out DIR] [--json]  wait for a job you submitted, then download it
+    sc-job status <service id> <job>                    the job as the service reports it (raw JSON)
+    sc-job cancel <service id> <job>                    withdraw a queued job, or delete a finished one
+                                                        (fetch, status and cancel take --poll PATH if not /jobs/<job>)
 
     sc-job call wafer-services/scene-render /render '{"scene":"<id>","mode":"quick"}' --store projects
 
 `call` finds the service's address in `GET /services/{id}`, submits BODY to
-<submit path> there, polls until the job is `done`, `failed` or `cancelled`,
-and on `done` downloads every file the job's `results` name into --out
-(default ./<job>). It prints the files, and with --store the plane files you
-now own and a line to embed the first image.
+<submit path> there, and polls until the job ends. It keeps waiting through
+dropped connections and 5xx answers, backing off up to a minute. On `done` it
+downloads every file the job's `results` name into --out (default ./<job>),
+and prints the files, the plane files you now own by role, and a line to embed
+the first image.
+
+The job ends `done`, or as a failure: `failed`, `cancelled` (or `canceled`),
+`error` or `expired`. Any other status is waited out; an unfamiliar one is
+named once on stderr.
 
 --store GROUP mints a grant for that service and that plane group (one you
 edit, from `GET /groups`), adds it to BODY as "grant", and revokes it when the
-job ends, however it ends. --ttl is the grant's life (default 7200 s). With
---no-wait it prints the job id, leaves the grant live, and says how to revoke it.
+job ends. --ttl is the grant's life (default 7200 s). With --no-wait, or if you
+stop waiting with Ctrl-C, the job carries on and the grant stays live until its
+ttl so the uploads still land; sc-job prints how to resume (`sc-job fetch`) and
+how to revoke. If a revoke fails it says so, prints the command, and carries on.
 
 What a service has to answer (tools.md, "Register a service"): the submit reply
 names `job` (and may name `poll`, else /jobs/<job>); the poll answers `status`,
@@ -29,40 +38,74 @@ with `error` when it failed; `results` names each file by its path under
 <poll>/files/; `plane_files` holds what it stored on your grant; DELETE on the
 poll path withdraws the job.
 
-Exit: 0 done · 1 failed or cancelled · 2 usage, refusal or HTTP error.
+Exit: 0 done; 1 failed/cancelled/expired; 2 usage, HTTP or interrupted.
 
 Where it calls (as sc-say): --plane NAME (a plane the serving plane names) > $SAMCLOUD_API
-  > API= in ~/.config/samcloud/wake.env > the plane this copy was served from.
+  > API= in ~/.config/samcloud/wake.env > the plane this copy was served from. https, or loopback.
 Auth — a 0600 header file, never the bearer on a command line (#582):
-  --hdr FILE > $SAMCLOUD_AUTH_HDR > ~/.samcloud/token.hdr
-The bearer goes only to the plane and to the service's own address. It is never
-printed, and never sent on a redirect to another host. Python 3 standard library only.
+  --hdr FILE (must exist) > $SAMCLOUD_AUTH_HDR > ~/.samcloud/token.hdr
+The bearer goes only to the plane and to the service's own https address, and is
+never printed. API calls follow a redirect only to the same origin. A download
+may follow an https redirect to another host, without the bearer; a redirect to
+plain http is refused. Python 3 standard library only.
 """
 import argparse
+import http.client
 import json
 import os
 import pathlib
 import re
+import shlex
+import signal
 import sys
+import tempfile
 import time
 import urllib.error
 import urllib.parse
 import urllib.request
 
 PROG = "sc-job"
-TERMINAL = ("done", "failed", "cancelled")
+OK = ("done",)
+FAILED = ("failed", "cancelled", "canceled", "error", "expired")
+WAITING = ("queued", "running")
+UNKNOWN_WARN_AFTER = 3
 try:
     _PLANES = json.loads('__PLANES_JSON__')
 except ValueError:          # an unrendered copy, run from a checkout
     _PLANES = {}
 _SERVED_API = "__API__"
-JOB_ID = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$")
-REL_FILE = re.compile(r"^[A-Za-z0-9_][A-Za-z0-9._-]*(/[A-Za-z0-9_][A-Za-z0-9._-]*)*$")
-# Poll back-off, seconds: start, ceiling. SC_JOB_POLL_S="start,ceiling" tunes it.
-try:
-    POLL_MIN, POLL_MAX = (float(x) for x in os.environ.get("SC_JOB_POLL_S", "5,15").split(","))
-except ValueError:
-    POLL_MIN, POLL_MAX = 5.0, 15.0
+JOB_ID = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,127}")
+REL_FILE = re.compile(r"[A-Za-z0-9_][A-Za-z0-9._-]*(/[A-Za-z0-9_][A-Za-z0-9._-]*)*")
+LOOPBACK = ("localhost", "127.0.0.1", "::1")
+ANSI = re.compile(r"\x1b\[[0-?]*[ -/]*[@-~]|\x1b\][^\x07\x1b]*(\x07|\x1b\\)?")
+CONTROL = re.compile(r"[\x00-\x1f\x7f-\x9f]")
+
+
+def _pair(name, default):
+    try:
+        a, b = (float(x) for x in os.environ.get(name, default).split(","))
+        return a, b
+    except ValueError:
+        return tuple(float(x) for x in default.split(","))
+
+
+# Seconds: poll back-off (start, ceiling) and retry back-off (start, ceiling). Tunable for tests.
+POLL_MIN, POLL_MAX = _pair("SC_JOB_POLL_S", "5,15")
+RETRY_MIN, RETRY_MAX = _pair("SC_JOB_RETRY_S", "2,60")
+
+
+class CallError(Exception):
+    """A call that could not be made or was refused; the message is for the user."""
+
+
+class RedirectRefused(Exception):
+    pass
+
+
+def clean(value, limit=300):
+    """An untrusted string, safe to print: escape sequences and control characters removed."""
+    s = CONTROL.sub(" ", ANSI.sub("", str(value)))
+    return s[:limit] + ("…" if len(s) > limit else "")
 
 
 def die(msg, code=2):
@@ -72,6 +115,10 @@ def die(msg, code=2):
 
 def note(msg):
     print(msg, file=sys.stderr, flush=True)
+
+
+def is_loopback(url):
+    return urllib.parse.urlsplit(url).hostname in LOOPBACK
 
 
 def plane_api(plane):
@@ -94,96 +141,178 @@ def plane_api(plane):
         die("no API: this copy was not served by a registry and the seat has no wake.env; "
             "install it with: curl -s -H @\"$HOME/.samcloud/token.hdr\" <API>/helpers/job > ~/.local/bin/sc-job")
     api = api.rstrip("/")
+    scheme = urllib.parse.urlsplit(api).scheme
+    if scheme != "https" and not (scheme == "http" and is_loopback(api)):
+        die(f"refusing to send your token to the plane over {scheme or 'no scheme'}: {clean(api)}")
     return api if api.endswith("/api/v1") else api + "/api/v1"
 
 
 def bearer(hdr):
-    candidates = [hdr or "", os.environ.get("SAMCLOUD_AUTH_HDR", ""),
-                  str(pathlib.Path.home() / ".samcloud" / "__TOKEN_HDR__"),
-                  str(pathlib.Path.home() / ".samcloud" / "token.hdr")]
+    """(value, path) of the seat's Authorization header. An explicit --hdr must exist: no fallback."""
+    if hdr:
+        if not (os.path.isfile(hdr) and os.access(hdr, os.R_OK)):
+            die(f"no readable header file at {hdr}")
+        candidates = [hdr]
+    else:
+        candidates = [os.environ.get("SAMCLOUD_AUTH_HDR", ""),
+                      str(pathlib.Path.home() / ".samcloud" / "__TOKEN_HDR__"),
+                      str(pathlib.Path.home() / ".samcloud" / "token.hdr")]
     for c in candidates:
         if c and os.path.isfile(c) and os.access(c, os.R_OK):
             for line in pathlib.Path(c).read_text().splitlines():
                 name, _, value = line.partition(":")
                 if name.strip().lower() == "authorization" and value.strip():
-                    return value.strip()
+                    return value.strip(), c
+            if hdr:
+                die(f"{hdr} holds no Authorization line")
     die("no samcloud header file (--hdr, SAMCLOUD_AUTH_HDR or ~/.samcloud/token.hdr)")
 
 
-class SameHostRedirects(urllib.request.HTTPRedirectHandler):
-    """The bearer is never sent on a redirect to another host or scheme."""
+def origin(url):
+    u = urllib.parse.urlsplit(url)
+    return (u.scheme, u.netloc)
+
+
+class ApiRedirects(urllib.request.HTTPRedirectHandler):
+    """An API call follows a redirect only to its own origin."""
 
     def redirect_request(self, req, fp, code, msg, headers, newurl):
+        if origin(newurl) != origin(req.full_url):
+            raise RedirectRefused(f"refusing a redirect from {origin(req.full_url)[1]} to {clean(newurl, 120)}")
+        return super().redirect_request(req, fp, code, msg, headers, newurl)
+
+
+class DownloadRedirects(urllib.request.HTTPRedirectHandler):
+    """A download may follow an https redirect to another host, without the bearer. Never to plain http."""
+
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        same = origin(newurl) == origin(req.full_url)
+        if not same and urllib.parse.urlsplit(newurl).scheme != "https":
+            raise RedirectRefused(f"refusing a download redirect to {clean(newurl, 120)}: not https")
         new = super().redirect_request(req, fp, code, msg, headers, newurl)
-        old, nu = urllib.parse.urlsplit(req.full_url), urllib.parse.urlsplit(newurl)
-        if new is not None and (nu.scheme, nu.netloc) != (old.scheme, old.netloc):
+        if new is not None and not same:
             new.headers.pop("Authorization", None)
             new.unredirected_hdrs.pop("Authorization", None)
         return new
 
 
+def refused_before_send(e):
+    return isinstance(e, urllib.error.URLError) and isinstance(getattr(e, "reason", None), ConnectionRefusedError)
+
+
 class Client:
-    def __init__(self, api, auth):
-        self.api, self.auth = api, auth
-        self.opener = urllib.request.build_opener(SameHostRedirects)
-        self.allowed = {self.origin(api)}
+    def __init__(self, api, auth, hdr_path=""):
+        self.api, self.auth, self.hdr_path = api, auth, hdr_path
+        self.api_opener = urllib.request.build_opener(ApiRedirects)
+        self.dl_opener = urllib.request.build_opener(DownloadRedirects)
+        self.allowed = {origin(api)}
 
-    @staticmethod
-    def origin(url):
-        u = urllib.parse.urlsplit(url)
-        return (u.scheme, u.netloc)
+    def revoke_hint(self, grant_id):
+        return (f"curl -s -H @{shlex.quote(self.hdr_path or os.path.expanduser('~/.samcloud/token.hdr'))} "
+                f"-X DELETE {self.api}/grants/{grant_id}")
 
-    def call(self, method, url, body=None, raw=False, timeout=60):
-        if self.origin(url) not in self.allowed:
-            die(f"refusing to send your token to {urllib.parse.urlsplit(url).netloc}")
+    def call(self, method, url, body=None, *, tries=5, stream_to=None, what=None):
+        """One call. tries=None retries for ever (polling); a POST is retried only when the
+        connection was refused before anything was sent. Raises CallError."""
+        if origin(url) not in self.allowed:
+            raise CallError(f"refusing to send your token to {clean(urllib.parse.urlsplit(url).netloc)}")
         data = None if body is None else json.dumps(body).encode()
-        req = urllib.request.Request(url, data=data, method=method, headers={"Authorization": self.auth})
-        if data is not None:
-            req.add_header("Content-Type", "application/json")
-        try:
-            with self.opener.open(req, timeout=timeout) as r:
-                payload = r.read()
-        except urllib.error.HTTPError as e:
+        label = what or f"{method} {url.split('?')[0]}"
+        attempt, delay, streak = 0, RETRY_MIN, False
+        while True:
+            attempt += 1
+            req = urllib.request.Request(url, data=data, method=method, headers={"Authorization": self.auth})
+            if data is not None:
+                req.add_header("Content-Type", "application/json")
+            opener = self.dl_opener if stream_to is not None else self.api_opener
             try:
-                err = json.loads(e.read())
-                msg = err.get("error") or err.get("detail") if isinstance(err, dict) else None
-            except Exception:
-                msg = None
-            die(f"{method} {url.split('?')[0]} → {e.code}: {msg or e.reason}")
-        except urllib.error.URLError as e:
-            die(f"can't reach {urllib.parse.urlsplit(url).netloc}: {e.reason}")
-        if raw:
-            return payload
+                with opener.open(req, timeout=300 if stream_to is not None else 60) as r:
+                    if stream_to is not None:
+                        return self._stream(r, stream_to)
+                    payload = r.read()
+                break
+            except RedirectRefused as e:
+                raise CallError(str(e))
+            except urllib.error.HTTPError as e:
+                retryable = (e.code >= 500 or e.code == 429) and method != "POST"
+                reason = f"{e.code}: {self._error_text(e)}"
+            except (urllib.error.URLError, OSError, http.client.HTTPException) as e:
+                reason = clean(getattr(e, "reason", None) or e.__class__.__name__ + (f" {e}" if str(e) else ""))
+                retryable = method != "POST" or refused_before_send(e)
+                if method == "POST" and not retryable:
+                    raise CallError(f"{label}: the connection failed after sending ({reason}). It may have "
+                                    f"reached the service: check before you send it again, so it doesn't run twice")
+            if not retryable or (tries is not None and attempt >= tries):
+                raise CallError(f"{label} → {reason}" + (f" (after {attempt} tries)" if attempt > 1 else ""))
+            if not streak:
+                note(f"{PROG}: {label} → {reason}; retrying" + (" until it answers" if tries is None else ""))
+                streak = True
+            time.sleep(delay)
+            delay = min(RETRY_MAX, delay * 2)
         try:
             return json.loads(payload) if payload.strip() else {}
         except ValueError:
-            die(f"{method} {url.split('?')[0]} did not answer JSON")
+            raise CallError(f"{label} did not answer JSON")
+
+    @staticmethod
+    def _error_text(e):
+        try:
+            err = json.loads(e.read())
+            msg = (err.get("error") or err.get("detail")) if isinstance(err, dict) else None
+        except Exception:
+            msg = None
+        return clean(msg or e.reason)
+
+    @staticmethod
+    def _stream(r, dest):
+        """Write the body to a temp file beside dest, then put it in place."""
+        fd, tmp = tempfile.mkstemp(dir=dest.parent, prefix=".sc-job-")
+        try:
+            with os.fdopen(fd, "wb") as f:
+                while True:
+                    chunk = r.read(1 << 16)
+                    if not chunk:
+                        break
+                    f.write(chunk)
+            os.replace(tmp, dest)
+        except BaseException:
+            try:
+                os.unlink(tmp)
+            except OSError:
+                pass
+            raise
+        return dest
 
 
 def service_base(c, service):
     s = c.call("GET", f"{c.api}/services/{urllib.parse.quote(service, safe='')}")
     url = (s.get("external_url") or "").rstrip("/")
     if not url:
-        die(f"{service} has no external_url: it can't be called from here")
-    u = urllib.parse.urlsplit(url)
-    loopback = u.hostname in ("localhost", "127.0.0.1", "::1")
-    if u.scheme != "https" and not (u.scheme == "http" and loopback):
-        die(f"{service} answers at {url}; refusing to send your token over {u.scheme or 'no scheme'}")
-    c.allowed.add(c.origin(url))
+        die(f"{clean(service)} has no external_url: it can't be called from here")
+    if not callable_url(url):
+        die(f"{clean(service)} answers at {clean(url)}; refusing to send your token over "
+            f"{urllib.parse.urlsplit(url).scheme or 'no scheme'}")
+    c.allowed.add(origin(url))
     return url
+
+
+def callable_url(url):
+    scheme = urllib.parse.urlsplit(url or "").scheme
+    return bool(url) and (scheme == "https" or (scheme == "http" and is_loopback(url)))
 
 
 def safe_path(path, what):
     """A path on the service: absolute, no scheme or host, no '..' segment."""
     if (not isinstance(path, str) or not path.startswith("/") or path.startswith("//")
-            or "://" in path or "\\" in path or ".." in path.split("/") or "?" in path or "#" in path):
-        die(f"refusing an unexpected {what} from the service: {str(path)[:120]!r}")
+            or "://" in path or "\\" in path or ".." in path.split("/") or "?" in path or "#" in path
+            or CONTROL.search(path)):
+        die(f"refusing an unexpected {what} from the service: {clean(path, 120)!r}")
     return path
 
 
 def job_id(j):
-    if not isinstance(j, str) or not JOB_ID.match(j):
-        die(f"not a job id: {str(j)[:80]!r}")
+    if not isinstance(j, str) or not JOB_ID.fullmatch(j):
+        die(f"not a job id: {clean(j, 80)!r}")
     return j
 
 
@@ -209,30 +338,38 @@ def result_files(j, base, poll):
         if not s.startswith(prefix):
             continue
         rel = urllib.parse.unquote(s[len(prefix):])
-        if not REL_FILE.match(rel) or ".." in rel.split("/"):
-            die(f"refusing a file path outside the job's files: {s[:120]!r}")
+        if not REL_FILE.fullmatch(rel) or ".." in rel.split("/"):
+            die(f"refusing a file path outside the job's files: {clean(s, 120)!r}")
         if rel not in out:
             out.append(rel)
     return out
 
 
-def download(c, base, poll, rels, out):
+def targets(rels, out):
+    """Where each file goes, all checked before anything is fetched: inside --out,
+    following any link already there."""
     out.mkdir(parents=True, exist_ok=True)
     root = out.resolve()
+    plan = []
     for rel in rels:
         dest = (out / rel).resolve()
         if root not in dest.parents:
             die(f"refusing to write outside {out}: {rel!r}")
-        data = c.call("GET", f"{base}{poll.rstrip('/')}/files/{urllib.parse.quote(rel)}", raw=True, timeout=300)
+        plan.append((rel, dest))
+    return plan
+
+
+def download(c, base, poll, rels, out):
+    for rel, dest in targets(rels, out):
         dest.parent.mkdir(parents=True, exist_ok=True)
-        dest.write_bytes(data)
+        c.call("GET", f"{base}{poll.rstrip('/')}/files/{urllib.parse.quote(rel)}", stream_to=dest)
 
 
 def flatten(value, role=""):
     if isinstance(value, bool):
         return
-    if isinstance(value, int) or (isinstance(value, str) and value.isdigit()):
-        yield role or "file", int(value)
+    if isinstance(value, int) or (isinstance(value, str) and value.isascii() and value.isdecimal()):
+        yield clean(role or "file", 120), int(value)
     elif isinstance(value, dict):
         for k, v in value.items():
             yield from flatten(v, f"{role}/{k}" if role else str(k))
@@ -242,36 +379,54 @@ def flatten(value, role=""):
 
 
 def wait(c, base, poll, job):
-    last, delay = None, POLL_MIN
+    last, delay, odd = None, POLL_MIN, 0
     while True:
-        j = c.call("GET", base + poll)
+        j = c.call("GET", base + poll, tries=None, what=f"polling job {job}")
         status = j.get("status")
-        pos = j.get("position") if j.get("position") is not None else j.get("gpu_position")
-        now = (status, j.get("stage"), pos)
+        now = (status, j.get("stage"), position(j))
         if now != last:
-            where = j.get("stage") or status
-            note(f"  {time.strftime('%H:%M:%S')} {job} {where}" + (f", position {pos}" if pos else ""))
+            progress(job, j)
             last, delay = now, POLL_MIN
         else:
             delay = min(POLL_MAX, delay + POLL_MIN)
-        if status in TERMINAL:
+        if status in OK + FAILED:
             return j
+        if status not in WAITING:
+            odd += 1
+            if odd == UNKNOWN_WARN_AFTER:
+                note(f"{PROG}: job {job} reports status {clean(status, 40)!r}, which sc-job doesn't know; "
+                     f"still waiting for done, or one of {', '.join(FAILED)}")
         time.sleep(delay)
 
 
+def position(j):
+    return j.get("position") if j.get("position") is not None else j.get("gpu_position")
+
+
+def progress(job, j):
+    where = clean(j.get("stage") or j.get("status"), 80)
+    pos = position(j)
+    note(f"  {time.strftime('%H:%M:%S')} {job} {where}" + (f", position {clean(pos, 12)}" if pos else ""))
+
+
 def first_image(c, ids):
+    """Best effort: the first of up to three ids that the plane says is an image."""
     for fid in ids[:3]:
-        f = c.call("GET", f"{c.api}/files/{fid}")
+        try:
+            f = c.call("GET", f"{c.api}/files/{fid}", tries=1)
+        except CallError:
+            continue
         if str(f.get("content_type") or "").startswith("image/"):
             return fid
     return None
 
 
 def summary(c, j, job, out, rels):
-    times = ", ".join(f"{k[:-2]} {j[k]} s" for k in ("waited_s", "render_s", "run_s") if j.get(k) is not None)
-    line = f"job {job}: {j.get('status')}" + (f" · {times}" if times else "")
+    times = ", ".join(f"{k[:-2]} {clean(j[k], 20)} s" for k in ("waited_s", "render_s", "run_s")
+                      if j.get(k) is not None)
+    line = f"job {job}: {clean(j.get('status'), 40)}" + (f" · {times}" if times else "")
     if j.get("status") != "done" and j.get("error"):
-        line += f" · {j['error']}"
+        line += f" · {clean(j['error'])}"
     print(line)
     if rels:
         shown = ", ".join(rels[:6]) + (f", … ({len(rels)} in all)" if len(rels) > 6 else "")
@@ -285,9 +440,22 @@ def summary(c, j, job, out, rels):
         if img is not None:
             print(f"embed: ![](/api/v1/files/{img}/raw)")
     if j.get("plane_error"):
-        print(f"plane upload: {j['plane_error']}")
+        print(f"plane upload: {clean(j['plane_error'])}")
     if j.get("expires"):
-        print(f"kept on the service until {j['expires']}")
+        print(f"kept on the service until {clean(j['expires'], 40)}")
+
+
+def finish(c, a, base, poll, job, j):
+    out = pathlib.Path(a.out or job)
+    rels = []
+    if j.get("status") == "done":
+        rels = result_files(j, base, poll)
+        download(c, base, poll, rels, out)
+    if a.json:
+        print(json.dumps(j, indent=1))
+    else:
+        summary(c, j, job, out, rels)
+    return 0 if j.get("status") in OK else 1
 
 
 def read_body(arg):
@@ -300,63 +468,98 @@ def read_body(arg):
         die(f"BODY is not JSON: {e}")
 
 
+def revoke(c, grant):
+    """Best effort: a failed revoke is reported with the command, and the job's results still come back."""
+    try:
+        c.call("DELETE", f"{c.api}/grants/{grant['id']}", tries=3, what=f"revoking grant {grant['id']}")
+    except CallError as e:
+        note(f"{PROG}: could not revoke grant {grant['id']} ({e}). It expires at "
+             f"{clean(grant.get('expires_at'), 40)}; to revoke it now:\n  {c.revoke_hint(grant['id'])}")
+
+
+def fetch_hint(a, job, poll):
+    extra = f" --poll {shlex.quote(poll)}" if poll != f"/jobs/{job}" else ""
+    return f"sc-job fetch {shlex.quote(a.service)} {job}{extra}"
+
+
 def cmd_call(c, a):
     base = service_base(c, a.service)
     submit = safe_path(a.path, "submit path")
     body = read_body(a.body)
-    grant = None
-    if a.store:
-        if not isinstance(body, dict):
-            die("--store needs BODY to be a JSON object, to carry the grant")
-        grant = c.call("POST", f"{c.api}/grants",
-                       {"service_id": a.service, "group_scope": a.store, "ttl_s": a.ttl})
-        body["grant"] = grant["grant"]
-    job = None
+    if a.store and not isinstance(body, dict):
+        die("--store needs BODY to be a JSON object, to carry the grant")
+    grant, keep = None, False
     try:
-        sub = c.call("POST", base + submit, body)
+        if a.store:
+            grant = c.call("POST", f"{c.api}/grants",
+                           {"service_id": a.service, "group_scope": a.store, "ttl_s": a.ttl},
+                           what="minting the grant")
+            body["grant"] = grant["grant"]
+        sub = c.call("POST", base + submit, body, what=f"submitting to {a.service}")
         job = job_id(sub.get("job"))
         poll = safe_path(sub["poll"], "poll path") if sub.get("poll") else f"/jobs/{job}"
-        note(f"{PROG}: job {job} submitted to {a.service}" + (f", storing into {a.store}" if a.store else ""))
+        note(f"{PROG}: job {job} submitted to {clean(a.service)}" + (f", storing into {clean(a.store)}" if a.store else ""))
         if a.no_wait:
             print(job)
             if grant:
-                note(f"grant {grant['id']} stays live until {grant.get('expires_at')}; once the job is done:\n"
-                     f"  curl -s -H @\"$HOME/.samcloud/token.hdr\" -X DELETE {c.api}/grants/{grant['id']}")
+                keep = True
+                note(f"grant {grant['id']} stays live until {clean(grant.get('expires_at'), 40)}; "
+                     f"once the job is done:\n  {fetch_hint(a, job, poll)}\n  {c.revoke_hint(grant['id'])}")
             return 0
+        try:
+            j = wait(c, base, poll, job)
+        except KeyboardInterrupt:
+            note(f"\n{PROG}: stopped waiting. Job {job} carries on at the service.")
+            if grant:
+                keep = True
+                note(f"  grant {grant['id']} stays live until {clean(grant.get('expires_at'), 40)}, "
+                     f"so its uploads still land.")
+            note(f"  resume:  {fetch_hint(a, job, poll)}")
+            if grant:
+                note(f"  revoke once it's done:  {c.revoke_hint(grant['id'])}")
+            return 2
+    finally:
+        if grant and not keep:
+            revoke(c, grant)
+    return finish(c, a, base, poll, job, j)
+
+
+def cmd_fetch(c, a):
+    base = service_base(c, a.service)
+    job = job_id(a.job)
+    poll = safe_path(a.poll, "poll path") if a.poll else f"/jobs/{job}"
+    try:
         j = wait(c, base, poll, job)
     except KeyboardInterrupt:
-        if job:
-            note(f"\n{PROG}: stopped waiting; job {job} carries on at the service "
-                 f"(sc-job status {a.service} {job})")
+        note(f"\n{PROG}: stopped waiting. Job {job} carries on; resume:  {fetch_hint(a, job, poll)}")
         return 2
-    finally:
-        if grant and not a.no_wait:
-            c.call("DELETE", f"{c.api}/grants/{grant['id']}")
-    out = pathlib.Path(a.out or job)
-    rels = []
-    if j.get("status") == "done":
-        rels = result_files(j, base, poll)
-        download(c, base, poll, rels, out)
-    if a.json:
-        print(json.dumps(j, indent=1))
-    else:
-        summary(c, j, job, out, rels)
-    return 0 if j.get("status") == "done" else 1
+    return finish(c, a, base, poll, job, j)
 
 
 def cmd_list(c, a):
     rows = c.call("GET", f"{c.api}/services")
     for s in rows if isinstance(rows, list) else rows.get("services", []):
-        desc = re.split(r"(?<=[.!?])\s|\n", (s.get("description") or "").strip(), maxsplit=1)[0][:120]
-        print(f"{s.get('id')}  {s.get('last_health_status') or '-'}  {s.get('external_url') or '-'}  {desc}")
+        desc = re.split(r"(?<=[.!?])\s|\n", clean(s.get("description") or "", 2000).strip(), maxsplit=1)[0][:120]
+        url = s.get("external_url")
+        where = clean(url, 120) if callable_url(url) else \
+            f"(not callable by sc-job: {'no address' if not url else 'no https address'})"
+        print(f"{clean(s.get('id'), 120)}  {clean(s.get('last_health_status') or '-', 20)}  {where}  {desc}")
     return 0
 
 
+def _stop(signum, _frame):
+    raise SystemExit(2)
+
+
 def main():
+    signal.signal(signal.SIGTERM, _stop)
+    if hasattr(signal, "SIGHUP"):
+        signal.signal(signal.SIGHUP, _stop)
     ap = argparse.ArgumentParser(prog=PROG, description=__doc__.split("\n\n")[0],
+                                 epilog="Exit: 0 done; 1 failed/cancelled/expired; 2 usage, HTTP or interrupted.",
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--plane", help="a plane the serving plane names")
-    ap.add_argument("--hdr", help="the 0600 header file holding your bearer")
+    ap.add_argument("--hdr", help="the 0600 header file holding your bearer (must exist)")
     sub = ap.add_subparsers(dest="cmd", required=True)
     sub.add_parser("list", help="services you can see")
     p = sub.add_parser("call", help="submit a job, wait for it, download what it made")
@@ -368,24 +571,44 @@ def main():
     p.add_argument("--out", help="download into this folder (default ./<job>)")
     p.add_argument("--no-wait", action="store_true", help="submit, print the job id and return")
     p.add_argument("--json", action="store_true", help="print the final job as JSON instead of a summary")
-    for name, h in (("status", "a job's state"), ("cancel", "withdraw or delete a job")):
+    f = sub.add_parser("fetch", help="wait for a job you submitted, then download it")
+    for name, h in (("status", "a job's state, as raw JSON"), ("cancel", "withdraw or delete a job")):
         q = sub.add_parser(name, help=h)
         q.add_argument("service")
         q.add_argument("job")
         q.add_argument("--poll", help="the job's path, if not /jobs/<job>")
+    f.add_argument("service")
+    f.add_argument("job")
+    f.add_argument("--poll", help="the job's path, if not /jobs/<job>")
+    f.add_argument("--out", help="download into this folder (default ./<job>)")
+    f.add_argument("--json", action="store_true", help="print the final job as JSON instead of a summary")
     a = ap.parse_args()
-    c = Client(plane_api(a.plane), bearer(a.hdr))
+    auth, hdr_path = bearer(a.hdr)
+    c = Client(plane_api(a.plane), auth, hdr_path)
     if a.cmd == "list":
         return cmd_list(c, a)
     if a.cmd == "call":
         if a.ttl <= 0:
             die("--ttl must be positive")
         return cmd_call(c, a)
+    if a.cmd == "fetch":
+        return cmd_fetch(c, a)
     base = service_base(c, a.service)
     poll = safe_path(a.poll, "poll path") if a.poll else f"/jobs/{job_id(a.job)}"
     print(json.dumps(c.call("GET" if a.cmd == "status" else "DELETE", base + poll), indent=1))
     return 0
 
 
+def run():
+    try:
+        sys.exit(main())
+    except CallError as e:
+        die(str(e))
+    except KeyboardInterrupt:
+        die("interrupted")
+    except Exception as e:      # never a traceback: one line, exit 2
+        die(f"unexpected {type(e).__name__}: {clean(e)}")
+
+
 if __name__ == "__main__":
-    sys.exit(main())
+    run()
