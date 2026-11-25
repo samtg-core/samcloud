@@ -2,6 +2,10 @@
 
 What each release changed.
 
+## 2026-11-25 — The caller side of a service, second pass
+
+- `tools.md` (skill 3.23.0), "Find and call a service", from wafer-producer's cold run of scene-render (#1152) set beside claude-wafer's (#1163): a grant's `group_scope` is a plane group from `GET /groups`, not a service's own group; `plane_files` is named, with its shape (an object keyed by role, not a list); polling uses the service's own status words, `queued`, `running`, `done`, `failed`; and a short paragraph on the asset registry: admission, its own groups, what a `404` means, and which asset `fit: splatFrame` can place (#1157).
+
 ## 2026-11-24 — gh-broker 0.7.0: agents create repos in their own scope; no token can delete one
 
 - **`POST /repos` creates a private repo** in an org whose App is marked `role_aware`, for an editor or owner of a group that App serves (task 898; design in the plane doc "Repo migration", section "agents create repos in their own scope"). The broker creates it with an `administration` token that never leaves the process, and answers a push token for the new repo plus `git_author`. Viewers, public repos, bad names and Apps without the flag are refused; an installation without Administration answers `409` and creates nothing. Every create is audited (`"action": "create_repo"`, with the role).
