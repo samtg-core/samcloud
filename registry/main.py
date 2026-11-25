@@ -93,12 +93,18 @@ def _dns_module_on() -> bool:
     return (Path.home() / ".config" / "samcloud" / "namecheap.env").exists()
 
 
-def _dns_record(op: str, subdomain: str, domain: str) -> dict:
+def _dns_record(op: str, subdomain: str, domain: str, *, repoint: bool = False,
+                caddy_status: Optional[dict] = None) -> dict:
     """Add or remove a service's DNS record through the dns-namecheap module.
 
     With the module off the record is the instance's own to manage, and the answer
-    says so rather than reporting a failure.
+    says so rather than reporting a failure. An add is skipped when Caddy refused
+    the route, and never repoints a name that points elsewhere unless repoint is
+    set (the admin's call; #1157, #44 review).
     """
+    if op == "add" and isinstance(caddy_status, dict) and caddy_status.get("success") is False:
+        return {"success": None, "skipped": True,
+                "message": "Caddy refused the route, so no DNS record was written"}
     if caddy.by_port(domain):
         return {"success": None, "skipped": True,
                 "message": "routes under an address are reached by port; there is no name to record"}
@@ -107,11 +113,32 @@ def _dns_record(op: str, subdomain: str, domain: str) -> dict:
                 "message": "dns-namecheap module is off; point the name at this host with your own DNS"}
     try:
         import dns as dns_mod
-        fn = dns_mod.add_record if op == "add" else dns_mod.remove_record
-        success, msg = fn(subdomain, domain)
+        if op == "add":
+            success, msg = dns_mod.add_record(subdomain, domain, repoint=repoint)
+        else:
+            success, msg = dns_mod.remove_record(subdomain, domain)
         return {"success": success, "message": msg}
     except Exception as e:
         return {"success": False, "message": str(e)}
+
+
+def _dns_preflight(subdomain: Optional[str], domain: str, *, admin: bool) -> None:
+    """Refuse a name that points somewhere other than the plane before anything
+    is stored or wired. The DNS step itself never repoints such a name, but by
+    then the service, the route and the Caddy block exist and claim it (#1157,
+    #45 review). The admin's request may repoint; a zone that can't be read is
+    a refusal, not a guess."""
+    if admin or not subdomain or caddy.by_port(domain) or not _dns_module_on():
+        return
+    try:
+        import dns as dns_mod
+        where = dns_mod.name_points_elsewhere(subdomain, domain)
+    except Exception as e:
+        raise HTTPException(503, f"Can't read DNS to check that {subdomain}.{domain} is free ({e}); "
+                                 "nothing was registered. Try again.")
+    if where:
+        raise HTTPException(409, f"{subdomain}.{domain} already points at {where}, not this plane; "
+                                 "only the admin repoints a name")
 
 
 def _external_url(subdomain: str, domain: Optional[str] = None) -> str:
@@ -2606,6 +2633,7 @@ def register_service(req: ServiceRegister, auth: AuthContext = Depends(get_auth)
             (req.subdomain, req.domain))
         if existing_route:
             raise HTTPException(409, f"Subdomain {req.subdomain}.{req.domain} already claimed by {existing_route['service_id']}")
+        _dns_preflight(req.subdomain, req.domain, admin=auth.is_admin())
 
     service_id = f"{req.device_id}/{req.name}"
     existing = db.query_one("SELECT id FROM services WHERE id = ?", (service_id,))
@@ -2695,7 +2723,8 @@ def register_service(req: ServiceRegister, auth: AuthContext = Depends(get_auth)
     # Wire DNS record
     dns_status = None
     if req.subdomain:
-        dns_status = _dns_record("add", req.subdomain, req.domain)
+        dns_status = _dns_record("add", req.subdomain, req.domain, repoint=auth.is_admin(),
+                                 caddy_status=caddy_status)
 
     # Generate service token
     service_token = enrollment.generate_service_token(service_id)
@@ -2846,6 +2875,7 @@ def activate_route(subdomain: str, domain: Optional[str] = None, auth: AuthConte
         _require_service_manager(auth, route["service_id"])
     elif not auth.is_admin():
         raise HTTPException(403, "Only an administrator can activate a route with no service")
+    _dns_preflight(subdomain, domain, admin=auth.is_admin())
 
     result = {}
 
@@ -2869,7 +2899,8 @@ def activate_route(subdomain: str, domain: Optional[str] = None, auth: AuthConte
         result["caddy"] = {"success": False, "message": str(e)}
 
     # Create/retry DNS record
-    result["dns"] = _dns_record("add", subdomain, domain)
+    result["dns"] = _dns_record("add", subdomain, domain, repoint=auth.is_admin(),
+                                caddy_status=result.get("caddy"))
 
     return {"status": "active", **result}
 
@@ -6723,6 +6754,11 @@ _AGENT_HELPERS = {
     # exited. What a runner job hook or a worker runs so a Unity job, a model
     # load and a splat transform queue against the same host in one order.
     "lease": "samcloud-lease",
+    # The service caller (#1157): submit a job to a registered service, wait for
+    # it, download what it made, and with --store keep it as plane files the
+    # caller owns, through a grant it mints and revokes. One command for every
+    # service that keeps the submit/poll/download contract in tools.md.
+    "job": "samcloud-job",
 }
 
 _RAIL_VERSION_CACHE: dict = {}
@@ -6740,6 +6776,7 @@ _RAIL_VERSION_SPECS = {
     "channel": ("samcloud-channel.py", r'^# CHANNEL_VERSION: (\S+)'),
     "adapter": ("samcloud-adapter.py", r'^# ADAPTER_VERSION: (\S+)'),
     "lease": ("samcloud-lease", r'^# LEASE_VERSION: (\S+)'),
+    "job": ("samcloud-job", r'^# JOB_VERSION: (\S+)'),
 }
 
 
@@ -7059,7 +7096,8 @@ def activate_service_slot(req: ServiceSlotActivate):
     # Wire DNS record
     dns_status = None
     if service.get("subdomain"):
-        dns_status = _dns_record("add", service["subdomain"], service.get("domain") or _service_domain())
+        dns_status = _dns_record("add", service["subdomain"], service.get("domain") or _service_domain(),
+                                 caddy_status=caddy_status)
 
     # Generate service token for ongoing auth
     service_token = enrollment.generate_service_token(service_id)
@@ -7144,6 +7182,15 @@ def register_service_authenticated(
     existing = db.query_one("SELECT id FROM services WHERE id = ?", (service_id,))
     if existing:
         raise HTTPException(409, f"Service {service_id} already registered")
+    # The same claim check as POST /services. Without it the route insert below
+    # was silently ignored and the service still advertised the other's URL.
+    if req.subdomain:
+        claimed = db.query_one(
+            "SELECT service_id FROM routes WHERE subdomain = ? AND lower(domain) = lower(?)",
+            (req.subdomain, req.domain))
+        if claimed:
+            raise HTTPException(409, f"Subdomain {req.subdomain}.{req.domain} already claimed by {claimed['service_id']}")
+        _dns_preflight(req.subdomain, req.domain, admin=False)
 
     # Auto-allocate a host forward port for a device reached by reverse tunnel,
     # keyed on the tunnel itself, as in the slot path above (it used to key on
@@ -9547,6 +9594,7 @@ def api_index():
                 "pr": {"method": "GET", "path": "/api/v1/helpers/pr", "auth": "any", "description": "sc-pr, the contribute tool: `sc-pr setup` once, then `sc-pr open --title … --ticket N` pushes your branch and opens a pull request on samcloud. The GitHub token is minted per call from the gh-broker and never touches argv or disk. Guide: skills/samcloud-agent/contributing.md"},
                 "new": {"method": "GET", "path": "/api/v1/helpers/new", "auth": "any", "description": "sc-new, the create tool: a ticket, task or doc made INTO a thread. Sends X-Session-Id (your conversation: replies come back, and the create joins the conversation's thread) and X-Thread-Id when you name one; a bare curl sends neither and lands in the identity's own thread"},
                 "edit": {"method": "GET", "path": "/api/v1/helpers/edit", "auth": "any", "description": "sc-edit, the revise tool: change a doc BODY. sc-say is comment-only and sc-new is create-only, so this is the only pen that can revise. Sends base_rev read at call time (a concurrent writer 409s instead of being overwritten), re-reads the doc after the write to verify the head is what you meant, and refuses an empty or unchanged body. Prefer --append for an additive edit: it reads the head server-side and cannot lose a revision"},
+                "job": {"method": "GET", "path": "/api/v1/helpers/job", "auth": "any", "description": "sc-job, the service caller: `sc-job call <service id> <submit path> BODY --store GROUP` submits a job to a registered service, waits for it, downloads what it made and, with --store, keeps it as plane files you own through a grant it mints and revokes. `sc-job list` shows the services you can call"},
                 "subscribe": {"method": "GET", "path": "/api/v1/helpers/subscribe", "auth": "any", "description": "For a terminal a person types into: prints what arrives for that session, as the rail would (run: curl … | python3 -)"},
                 "channel": {"method": "GET", "path": "/api/v1/helpers/channel", "auth": "any", "description": "The subscribe feed as a Claude Code channel (MCP server): each delivery is pushed into the interactive session, idle or not, with nothing to re-arm. Register it with `claude mcp add`, launch with --dangerously-load-development-channels server:samcloud (research preview)"},
                 "wsl_boot": {"method": "GET", "path": "/api/v1/helpers/wsl-boot", "auth": "any", "description": "Starts the Linux side of a Windows machine (WSL) at boot"},
