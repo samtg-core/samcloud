@@ -627,9 +627,8 @@ def interrupted_note(c, a, job, poll, grant):
     SIGHUP with it (a closing terminal, a supervisor, timeout) means sc-job is being shut down,
     perhaps with no one to read the hint: that wins, and the grant is revoked as for SIGTERM alone.
     It is decided once, and what is printed holds: the stops are blocked first, so one that comes
-    after the decision stays blocked and is dropped at exit. A stop delivered before that has
-    already run its handler: CPython re-arms its signal check when the Ctrl-C handler raises, and
-    runs the next due handler on entry to this function."""
+    after the decision stays blocked and is dropped at exit. A stop whose handler has run, or that
+    is pending, wins. Order is as delivered and handled, which needn't be the order sent."""
     stops = {s for s in (getattr(signal, n, None) for n in ("SIGTERM", "SIGHUP"))
              if s is not None and signal.getsignal(s) != signal.SIG_IGN}
     signal.pthread_sigmask(signal.SIG_BLOCK, stops)
