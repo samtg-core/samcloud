@@ -9498,6 +9498,7 @@ def api_index():
                 "create": {"method": "POST", "path": "/api/v1/grants", "auth": "person or agent", "description": "{service_id, group_scope?, ttl_s? (60..604800, default 86400)}: let one service upload files into one group you edit, owned by you. Answers the grant once (sc_grant_…); it is useless without that service's own token"},
                 "list": {"method": "GET", "path": "/api/v1/grants", "auth": "any", "description": "The grants you made (admin: all), with uses and expiry; never the grant itself"},
                 "revoke": {"method": "DELETE", "path": "/api/v1/grants/{id}", "auth": "creator/admin", "description": "End a grant now"},
+                "check": {"method": "POST", "path": "/api/v1/grants/check", "auth": "service", "description": "{grant, group_scope?}: the named service, with its own token, asks whether the grant would upload now, without using it. Answers {valid: true, id, creator, group_scope, expires_at, uses}, or {valid: false, status, reason} with the refusal POST /files would give. Compare creator with the caller who submitted"},
             },
             "tasks": {
                 "projects": {"method": "GET", "path": "/api/v1/projects", "auth": "any", "description": "Task plane — projects with computed progress rollups (?status ?group_scope). doc=record, ticket=request, task=actionable item"},
@@ -13677,6 +13678,27 @@ def _use_upload_grant(auth: AuthContext, grant: str, group_scope: Optional[str])
         raise HTTPException(403, f"{g['creator']} no longer edits '{g['group_scope']}', so the grant "
                                  f"cannot be used")
     return g
+
+
+class GrantCheck(StrictModel):
+    grant: str
+    group_scope: Optional[str] = None
+
+
+@app.post("/api/v1/grants/check")
+def check_grant(req: GrantCheck, auth: AuthContext = Depends(get_auth)):
+    """Would this grant upload now? The same checks as POST /files with grant=,
+    for the named service's own token, without using the grant. A service runs
+    it at submit, and compares `creator` with the caller who submitted, so a
+    grant someone else minted is refused before any work (task 1450)."""
+    if auth.token_type != "service":
+        raise HTTPException(403, "A grant is checked by the service it names, with that service's own token")
+    try:
+        g = _use_upload_grant(auth, req.grant, req.group_scope)
+    except HTTPException as exc:
+        return {"valid": False, "status": exc.status_code, "reason": exc.detail}
+    return {"valid": True, "id": g["id"], "creator": g["creator"], "group_scope": g["group_scope"],
+            "expires_at": g["expires_at"], "uses": g["uses"]}
 
 
 @app.post("/api/v1/files")

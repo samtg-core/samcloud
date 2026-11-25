@@ -2,6 +2,11 @@
 
 What each release changed.
 
+## 2026-11-25 — A service checks a grant without using it
+
+- **`POST /grants/check {grant, group_scope?}`**, with the named service's own token, runs the same checks as an upload on that grant and stores nothing (task 1450, asked for by wafer-unity for scene-render). It answers `{valid: true, id, creator, group_scope, expires_at, uses}`, or `{valid: false, status, reason}` with the refusal `POST /files` would give. A service runs it at submit and compares `creator` with the caller who submitted. Before this, a made-up or someone else's grant got through to the GPU and failed only at upload. Any other bearer is `403`.
+- `tools.md` (skill 3.23.1), "Register a service", says to check the grant at submit. `docs/Files.md` and the API map list the call.
+- Test: `registry/test_service_grants.py::TestGrantCheck` (3 tests).
 ## 2026-11-25 — The caller side of a service, second pass
 
 - `tools.md` (skill 3.23.0), "Find and call a service", from wafer-producer's cold run of scene-render (#1152) set beside claude-wafer's (#1163): a grant's `group_scope` is a plane group from `GET /groups`, not a service's own group; `plane_files` is named, with its shape (an object keyed by role, not a list); polling uses the service's own status words, `queued`, `running`, `done`, `failed`, `cancelled` (scene-render's `DELETE` on a job); and a short paragraph on the asset registry: admission, its own groups, what a `404` means, and which asset `fit: splatFrame` can place (#1157).

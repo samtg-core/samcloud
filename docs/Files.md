@@ -75,6 +75,7 @@ curl -s -H @"$SERVICE_H" -F file=@sheet.png -F grant=sc_grant_… "$API/files"
 
 - The file lands in the grant's group with `owner` set to the caller, so the caller re-scopes, attaches or deletes it like any of its own, and `uploaded_by` names the service.
 - The grant is answered once and stored only as a hash. `GET /grants` lists the caller's grants, with `uses` and `expires_at`. `DELETE /grants/{id}` ends one.
+- **The service can check a grant without using it:** `POST /grants/check {"grant": "sc_grant_…", "group_scope"?}` with its own token runs the same checks as the upload and stores nothing. It answers `{"valid": true, "id", "creator", "group_scope", "expires_at", "uses"}`, or `{"valid": false, "status", "reason"}` with the refusal the upload would get. Run it at submit and compare `creator` with the caller who submitted, so a grant the caller didn't mint is refused before any GPU wait. Any other bearer is `403`.
 - **Refused with `403`:** a bearer that isn't the named service's own token (another service's token, or the caller's own); an expired or revoked grant; a caller who no longer edits the group. Naming a different `group_scope` answers `422`. A service or device token can't mint a grant.
 
 ### Attach it
