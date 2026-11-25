@@ -307,23 +307,19 @@ class Client:
     @staticmethod
     def _stream(r, dest):
         """Write the body to a temp file beside dest, then put it in place."""
-        try:
-            expected = int(r.headers.get("Content-Length"))
-        except (TypeError, ValueError):
-            expected = None
         fd, tmp = tempfile.mkstemp(dir=dest.parent, prefix=".sc-job-")
         try:
-            got = 0
             with os.fdopen(fd, "wb") as f:
                 while True:
                     chunk = r.read(1 << 16)
                     if not chunk:
                         break
                     f.write(chunk)
-                    got += len(chunk)
-            # http.client returns short at EOF without raising: count against what was promised.
-            if expected is not None and got < expected:
-                raise http.client.IncompleteRead(b"", expected - got)
+            # At EOF short of a Content-Length, http.client returns what came without raising, and
+            # `length` is what's missing. A chunked body has no length (its framing ends it), and
+            # any Content-Length beside it is ignored, as http.client ignores it.
+            if getattr(r, "length", None):
+                raise http.client.IncompleteRead(b"", r.length)
             os.chmod(tmp, FILE_MODE)
             os.replace(tmp, dest)
         except BaseException:

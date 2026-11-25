@@ -135,12 +135,16 @@ class Plane(Base):
 SCENARIOS = {"ok": "J1", "fail": "J2", "escape": "J3", "redirect": "J4", "cancel": "J5", "link": "J6",
              "blips": "J7", "slow": "J8", "odd": "J9", "canceled": "J10", "flaky": "J11", "apiredir": "J13",
              "rate": "J14", "truncated": "J15", "lost404": "J16", "lost": "J17", "nostatus": "J18", "unicode": "J19",
-             "echo": "J20", "busy": "J21", "stuck": "J22", "longrun": "J23", "blank": "J24", "error": "J25"}
+             "echo": "J20", "busy": "J21", "stuck": "J22", "longrun": "J23", "blank": "J24", "error": "J25",
+             "big": "J27", "chunked": "J28", "shortbig": "J29"}
 REPLIES = {"badjob": {"job": "x/evil1"}, "badpoll": {"job": "J12", "poll": "/jobs/../evilpoll"}}
 FILES = {"/jobs/J1/files/sheet.png": b"PNGDATA", "/jobs/J1/files/stills/a-01.jpg": b"JPGDATA",
          "/jobs/J6/files/link/x.txt": b"LINKED", "/jobs/J7/files/out.txt": b"AFTERBLIPS",
          "/jobs/J11/files/out.txt": b"FLAKYOK", "/jobs/J14/files/out.txt": b"AFTER429",
          "/jobs/J19/files/my sheet é.png": b"SPACED", "/jobs/J19/files/stills/café 01.jpg": b"ACCENTED"}
+
+
+BIG = bytes(range(256)) * 800                  # 204800 bytes, not all one value
 
 
 def job_doc(job, n):
@@ -172,6 +176,8 @@ def job_doc(job, n):
         return {"job": job, "status": "canceled"}
     if job in ("J11", "J14", "J7"):
         return {"job": job, "status": "done", "results": [f"/jobs/{job}/files/out.txt"]}
+    if job in ("J27", "J28", "J29"):
+        return {"job": job, "status": "done", "results": [f"/jobs/{job}/files/big.bin"]}
     if job == "J15":
         return {"job": job, "status": "done", "results": [f"/jobs/{job}/files/big.bin"]}
     if job == "J16" and n >= 2:
@@ -255,6 +261,27 @@ class Service(Base):
             self.send_header("Content-Length", "100000")
             self.end_headers()
             self.wfile.write(b"x" * 1000)
+            self.wfile.flush()
+            self.close_connection = True
+            self.connection.shutdown(socket.SHUT_RDWR)
+            return
+        if self.path == "/jobs/J27/files/big.bin":   # well past one 64 KiB read
+            return self.send(200, raw=BIG)
+        if self.path == "/jobs/J28/files/big.bin":   # chunked, with a Content-Length that chunking overrides
+            self.send_response(200)
+            self.send_header("Content-Length", "999999")    # more than the body: a check on it would fail
+            self.send_header("Transfer-Encoding", "chunked")
+            self.end_headers()
+            for i in range(0, len(BIG), 70000):
+                part = BIG[i:i + 70000]
+                self.wfile.write(b"%x\r\n" % len(part) + part + b"\r\n")
+            self.wfile.write(b"0\r\n\r\n")
+            return
+        if self.path == "/jobs/J29/files/big.bin":   # promise 300000, send 200000 (past the first read), cut
+            self.send_response(200)
+            self.send_header("Content-Length", "300000")
+            self.end_headers()
+            self.wfile.write(BIG[:200000])
             self.wfile.flush()
             self.close_connection = True
             self.connection.shutdown(socket.SHUT_RDWR)
@@ -672,6 +699,18 @@ def main():
     check("... and a file already there is left as it was (written via a temp file)",
           content(Path(tmp) / "o-trunc2/big.bin") == b"OLD" and not list((Path(tmp) / "o-trunc2").glob(".sc-job-*")),
           sorted(q.name for q in (Path(tmp) / "o-trunc2").iterdir()))
+    r = run(["call", "dev/render", "/render", '{"scenario":"big"}', "--out", "o-big"], tmp)
+    check("a 200 KiB download lands whole", r.returncode == 0 and content(Path(tmp) / "o-big/big.bin") == BIG,
+          (r.returncode, len(content(Path(tmp) / "o-big/big.bin") or b""), r.stderr[-300:]))
+    r = run(["call", "dev/render", "/render", '{"scenario":"chunked"}', "--out", "o-chunk"], tmp)
+    check("a chunked download with a stray Content-Length lands whole (exit 0)",
+          r.returncode == 0 and content(Path(tmp) / "o-chunk/big.bin") == BIG,
+          (r.returncode, len(content(Path(tmp) / "o-chunk/big.bin") or b""), r.stderr[-300:]))
+    r = run(["call", "dev/render", "/render", '{"scenario":"shortbig"}', "--out", "o-shortbig"], tmp)
+    check("a download cut short after 200 KB of its 300 KB fails, leaving no file and no temp file",
+          r.returncode not in (0, None) and not (Path(tmp) / "o-shortbig/big.bin").exists()
+          and not list((Path(tmp) / "o-shortbig").glob(".sc-job-*")),
+          (r.returncode, sorted(q.name for q in (Path(tmp) / "o-shortbig").iterdir()) if (Path(tmp) / "o-shortbig").exists() else "no dir"))
     r = run(["call", "dev/render", "/render", '{"scenario":"unicode"}', "--out", "o-uni"], tmp)
     check("result names with spaces and non-ASCII letters download",
           r.returncode == 0 and content(Path(tmp) / "o-uni/my sheet é.png") == b"SPACED"
