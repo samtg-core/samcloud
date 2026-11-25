@@ -163,7 +163,8 @@ class Plane(Base):
 SCENARIOS = {"ok": "J1", "fail": "J2", "escape": "J3", "redirect": "J4", "cancel": "J5", "link": "J6",
              "blips": "J7", "slow": "J8", "odd": "J9", "canceled": "J10", "flaky": "J11", "apiredir": "J13",
              "rate": "J14", "truncated": "J15", "lost404": "J16", "lost": "J17", "nostatus": "J18", "unicode": "J19",
-             "echo": "J20", "leaky": "J38", "leakyfail": "J39", "embeds": "J40", "many": "J41", "busy": "J21", "stuck": "J22", "longrun": "J23", "blank": "J24", "error": "J25",
+             "echo": "J20", "leaky": "J38", "leakyfail": "J39", "embeds": "J40", "many": "J41",
+             "percent": "J42", "flap": "J43", "heartbeat": "J44", "queue": "J45", "busy": "J21", "stuck": "J22", "longrun": "J23", "blank": "J24", "error": "J25",
              "big": "J27", "chunked": "J28", "shortbig": "J29", "dropdl": "J30", "truncdl": "J31",
              "resetdl": "J32", "slowdl": "J33", "patchy": "J34", "mixed": "J35", "list": "J36",
              "inching": "J37"}
@@ -237,6 +238,17 @@ def job_doc(job, n):
         return {"job": job, "stage": f"frame {n}"}
     if job == "J25":
         return {"job": job, "status": "error", "error": "out of memory"}
+    if job == "J42":                              # moving only in a field the wait never names
+        return {"job": job, "status": "processing", "stage": "frames", "percent": n} if n < 30 else \
+               {"job": job, "status": "done", "results": []}
+    if job == "J43":                              # two unfamiliar statuses, alternating for ever
+        return {"job": job, "status": "ab"[n % 2]}
+    if job == "J44":                              # stuck, but its clock fields tick
+        return {"job": job, "status": "processing", "updated_at": f"T{n}", "run_s": n, "heartbeat": n,
+                "detail": {"checked_at": n}}
+    if job == "J45":                              # an unfamiliar status; only the queue position moves
+        return {"job": job, "status": "waiting", "position": 30 - n} if n < 30 else \
+               {"job": job, "status": "done", "results": []}
     if job == "J40":
         return {"job": job, "status": "done", "results": [],
                 "plane_files": {"ctl": 104, "long": 105, "own": 106, "dirty": 107, "brackets": 108}}
@@ -814,6 +826,19 @@ def main():
     check("an unfamiliar status whose progress alone moves is waited out past 20 polls (exit 0)",
           r.returncode == 0 and "job J37: done" in r.stdout and S.polls.get("J37", 0) > 20,
           (r.returncode, S.polls.get("J37"), r.stderr[-300:]))
+    for scenario, job, what in (("percent", "J42", "only `percent`, a field the wait never names"),
+                                ("queue", "J45", "only its queue position")):
+        r = run(["call", "dev/render", "/render", json.dumps({"scenario": scenario})], tmp)
+        check(f"an unfamiliar status where {what} moves is waited out past 20 polls (exit 0)",
+              r.returncode == 0 and f"job {job}: done" in r.stdout and S.polls.get(job, 0) > 20,
+              (r.returncode, S.polls.get(job), r.stderr[-300:]))
+    r = run(["call", "dev/render", "/render", '{"scenario":"flap"}'], tmp)
+    check("two unfamiliar statuses alternating stop the wait 20 polls after both were seen (exit 2)",
+          r.returncode == 2 and S.polls.get("J43") == 21 and "sc-job fetch dev/render J43" in r.stderr,
+          (r.returncode, S.polls.get("J43"), r.stderr[-300:]))
+    r = run(["call", "dev/render", "/render", '{"scenario":"heartbeat"}'], tmp)
+    check("a stuck job whose clock fields tick (`*_at`, `*_s`, heartbeat) stops the wait after 20 polls (exit 2)",
+          r.returncode == 2 and S.polls.get("J44") == 20, (r.returncode, S.polls.get("J44"), r.stderr[-300:]))
     r = run(["call", "dev/render", "/render", '{"scenario":"stuck"}'], tmp)
     check("an unfamiliar status that doesn't change stops the wait after 20 polls (exit 2)",
           r.returncode == 2 and S.polls.get("J22") == 20 and "sc-job fetch dev/render J22" in r.stderr,

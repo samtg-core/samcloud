@@ -25,11 +25,13 @@ the markdown, don't upload the downloads again.
 
 The job ends `done`, or as a failure: `failed`, `cancelled` (or `canceled`),
 `error` or `expired`. `queued` and `running` are waited out. Any other status
-is named once on stderr and waited out for as long as the answer changes (its
-status, stage, progress or position). After 20 polls in a row with the same such
-answer, or with no status at all, or 5 polls in a row that answer an error or no
-JSON, sc-job stops waiting (exit 2) and leaves the job and its grant alone,
-printing how to resume.
+is named once on stderr and waited out for as long as the job keeps giving
+answers it hasn't given before: any field counts (stage, progress, percent,
+position), except clock-like ones (`*_at`, `*_s`, `updated`, `heartbeat`, …).
+After 20 polls in a row with nothing new, or with no status at all, or 5 polls
+in a row that answer an error or no JSON, sc-job stops waiting (exit 2) and
+leaves the job and its grant alone, printing how to resume. Two statuses that
+alternate stop too, once both have been seen.
 
 --store GROUP mints a grant for that service and that plane group (one you
 edit, from `GET /groups`), adds it to BODY as "grant", and revokes it when the
@@ -79,7 +81,10 @@ OK = ("done",)
 FAILED = ("failed", "cancelled", "canceled", "error", "expired")
 WAITING = ("queued", "running")
 UNKNOWN_WARN_AFTER = 3     # polls with an unfamiliar status before it is named
-UNKNOWN_LIMIT = 20         # polls in a row with no status, or an unfamiliar one that doesn't change
+UNKNOWN_LIMIT = 20         # polls in a row with no status, or an unfamiliar one bringing no new answer
+SEEN_LIMIT = 4096          # distinct answers remembered per wait; past that, it starts again
+# Fields that change on every poll whether or not the job moves: not movement.
+CLOCK = re.compile(r"(_at|_s|_ms|_ts)$|^(time|timestamp|now|ts|updated|heartbeat|elapsed|eta|expires)$", re.I)
 POLL_BAD_LIMIT = 5         # polls in a row answering an error or no JSON
 EMBED_LIMIT = 24           # plane files whose record sc-job reads for their markdown
 try:
@@ -443,7 +448,7 @@ def flatten(value, role=""):
 
 def wait(c, base, poll, job):
     last, delay, bad = None, POLL_MIN, 0
-    answer, stale, odd, warned = None, 0, 0, False
+    answers, stale, odd, warned = set(), 0, 0, False
     while True:
         try:
             j = c.call("GET", base + poll, tries=None, what=f"polling job {job}")
@@ -467,7 +472,6 @@ def wait(c, base, poll, job):
             delay = min(POLL_MAX, delay + POLL_MIN)
         if status in OK + FAILED:
             return j
-        seen = now + (json.dumps(j.get("progress"), sort_keys=True, default=str),)
         if status in WAITING:
             stale = odd = 0
         else:
@@ -476,13 +480,26 @@ def wait(c, base, poll, job):
                 warned = True
                 note(f"{PROG}: job {job} reports status {clean(status, 40)!r}, which sc-job doesn't know; "
                      f"still waiting for done, or one of {', '.join(FAILED)}")
-            # A changing answer is progress, however the service names it; no status never is.
-            stale = stale + 1 if status is None or seen == answer else 1
+            # An answer never seen before is movement, whichever field moved. One seen before isn't,
+            # so a job flapping between two statuses ends too. No status is never movement.
+            key = json.dumps(movement(j), sort_keys=True, default=str)
+            if len(answers) >= SEEN_LIMIT:
+                answers.clear()
+            stale = 1 if status is not None and key not in answers else stale + 1
+            answers.add(key)
             if stale >= UNKNOWN_LIMIT:
                 raise PollLost(f"job {job} has answered " + ("no status" if status is None else
-                               f"status {clean(status, 40)!r}, unchanged,") + f" for {stale} polls")
-        answer = seen
+                               f"status {clean(status, 40)!r} with nothing new") + f" for {stale} polls")
         time.sleep(delay)
+
+
+def movement(value):
+    """The answer without its clock fields: what has to be new for a poll to count as movement."""
+    if isinstance(value, dict):
+        return {k: movement(v) for k, v in value.items() if not CLOCK.search(str(k))}
+    if isinstance(value, list):
+        return [movement(v) for v in value]
+    return value
 
 
 def position(j):

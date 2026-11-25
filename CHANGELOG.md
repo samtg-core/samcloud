@@ -12,6 +12,8 @@ What each release changed.
 
 - **`sc-job` 1.0.2, from claude-producer's review of 1.0.1 (#1447):**
   - Redaction hides only the grant's own shape, `sc_grant_` and 43 of `[A-Za-z0-9_-]` (the plane mints `sc_grant_` + `token_urlsafe(32)`), so a result named `sc_grant_report-2026.txt` prints as it is.
+  - Movement, for a status sc-job doesn't know, is an answer the wait hasn't seen before: any field, except clock-like ones (`*_at`, `*_s`, `*_ms`, `*_ts`, `updated`, `heartbeat`, …). A job moving only in a field sc-job never named (`percent`) is waited out; one flapping between two statuses stops 20 polls after both were seen; one whose clock fields tick but which is stuck stops at 20.
+- `tools.md` (skill 3.24.2): "Find and call a service" states that rule.
 
 ## 2026-11-25 — queue.md: make every release land
 
