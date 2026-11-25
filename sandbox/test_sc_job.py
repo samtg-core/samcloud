@@ -216,6 +216,8 @@ class Service(Base):
                                                "msg": "Extra inputs are not permitted", "input": body.get("grant")}]})
         if scenario == "submit500":
             return self.send(500, {"error": "can't take it"})
+        if scenario == "submit503":              # counted on its own: the 5xx-is-not-re-sent check
+            return self.send(503, {"error": "busy"})
         if scenario == "dropsubmit":             # took the body, then the line went dead
             self.close_connection = True
             self.connection.shutdown(socket.SHUT_RDWR)
@@ -732,6 +734,9 @@ def main():
     check("a submit that fails after sending is not re-sent (one POST), and says it may have landed",
           r.returncode == 2 and S.posts.get("dropsubmit") == 1 and "may have" in r.stderr,
           (r.returncode, S.posts.get("dropsubmit"), r.stderr))
+    r = run(["call", "dev/render", "/render", '{"scenario":"submit503"}', "--store", "projects"], tmp)
+    check("a submit answered 503 is not re-sent (one POST), exit 2",
+          r.returncode == 2 and S.posts.get("submit503") == 1, (r.returncode, S.posts.get("submit503"), r.stderr))
     r = run(["call", "dev/plain", "/render", "{}"], tmp)
     check("a service on plain http off loopback is refused", r.returncode == 2 and "refusing" in r.stderr, r.stderr)
     r = run(["call", "dev/render", "/../admin", "{}"], tmp)
