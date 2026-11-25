@@ -138,7 +138,8 @@ SCENARIOS = {"ok": "J1", "fail": "J2", "escape": "J3", "redirect": "J4", "cancel
              "rate": "J14", "truncated": "J15", "lost404": "J16", "lost": "J17", "nostatus": "J18", "unicode": "J19",
              "echo": "J20", "busy": "J21", "stuck": "J22", "longrun": "J23", "blank": "J24", "error": "J25",
              "big": "J27", "chunked": "J28", "shortbig": "J29", "dropdl": "J30", "truncdl": "J31",
-             "resetdl": "J32", "slowdl": "J33", "patchy": "J34", "mixed": "J35", "list": "J36"}
+             "resetdl": "J32", "slowdl": "J33", "patchy": "J34", "mixed": "J35", "list": "J36",
+             "inching": "J37"}
 REPLIES = {"badjob": {"job": "x/evil1"}, "badpoll": {"job": "J12", "poll": "/jobs/../evilpoll"}}
 FILES = {"/jobs/J1/files/sheet.png": b"PNGDATA", "/jobs/J1/files/stills/a-01.jpg": b"JPGDATA",
          "/jobs/J6/files/link/x.txt": b"LINKED", "/jobs/J7/files/out.txt": b"AFTERBLIPS",
@@ -197,6 +198,9 @@ def job_doc(job, n):
         return {"job": job}
     if job in ("J21", "J26"):                     # a status sc-job doesn't know, but moving
         return {"job": job, "status": "processing", "stage": f"frame {n}"} if n < 30 else \
+               {"job": job, "status": "done", "results": []}
+    if job == "J37":                              # the same unfamiliar status and stage; only progress moves
+        return {"job": job, "status": "processing", "stage": "frames", "progress": n / 30} if n < 30 else \
                {"job": job, "status": "done", "results": []}
     if job == "J22":                              # the same unfamiliar answer, for ever
         return {"job": job, "status": "processing", "stage": "frames"}
@@ -626,6 +630,39 @@ def main():
     check("a second SIGTERM during the revoke is ignored: the revoke finishes and the hint is printed",
           p.returncode == 2 and g and g[0] in S.revoked and "resume:  sc-job fetch dev/render J8" in e, (p.returncode, g, e))
     mark = S.next_grant
+    mark = S.next_grant
+    before = S.polls.get("J8", 0)
+    p = subprocess.Popen([sys.executable, str(HELPER), "call", "dev/render", "/render", '{"scenario":"slow"}',
+                          "--store", "projects", "--out", "o-amp"], cwd=tmp, env=env_for(tmp),
+                         stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
+                         preexec_fn=lambda: signal.signal(signal.SIGINT, signal.SIG_IGN))
+    wait_polls(before)
+    p.send_signal(signal.SIGINT)
+    time.sleep(0.5)
+    alive, polled = p.poll() is None, S.polls.get("J8", 0)
+    time.sleep(0.3)
+    still_polling = S.polls.get("J8", 0) > polled
+    p.send_signal(signal.SIGTERM)
+    o, e = p.communicate(timeout=30)
+    g = minted_since(mark)
+    check("started with SIGINT ignored (`&`), a SIGINT changes nothing: it keeps waiting, the grant stays",
+          alive and still_polling and "stopped waiting" not in e and g and "stopped by SIGTERM" in e,
+          (alive, still_polling, g, e[-300:]))
+    for sig in (signal.SIGINT, signal.SIGTERM):
+        mark = S.next_grant
+        p = subprocess.Popen([sys.executable, str(HELPER), "call", "dev/render", "/render", '{"scenario":"ok"}',
+                              "--store", "slowrevoke", "--out", f"o-done-{sig.name}"], cwd=tmp, env=env_for(tmp),
+                             stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+        deadline = time.time() + 20
+        while time.time() < deadline and not [x for x in S.plane if x[0] == "DELETE" and x[1].startswith("/api/v1/grants/")
+                                              and int(x[1].rsplit("/", 1)[1]) >= mark]:
+            time.sleep(0.02)
+        time.sleep(0.3)
+        p.send_signal(sig)
+        o, e = p.communicate(timeout=30)
+        check(f"a {sig.name} during the revoke after a done job is ignored: the files still land (exit 0)",
+              p.returncode == 0 and content(Path(tmp) / f"o-done-{sig.name}/sheet.png") == b"PNGDATA",
+              (p.returncode, e[-300:]))
     for first, second in ((signal.SIGINT, signal.SIGTERM), (signal.SIGTERM, signal.SIGINT)):
         for trial in range(2):
             mark = S.next_grant
@@ -711,6 +748,10 @@ def main():
     r = run(["fetch", "dev/render", "J26"], tmp)
     check("... and so is it by fetch", r.returncode == 0 and "job J26: done" in r.stdout and S.polls.get("J26", 0) > 20,
           (r.returncode, S.polls.get("J26"), r.stderr[-300:]))
+    r = run(["call", "dev/render", "/render", '{"scenario":"inching"}'], tmp)
+    check("an unfamiliar status whose progress alone moves is waited out past 20 polls (exit 0)",
+          r.returncode == 0 and "job J37: done" in r.stdout and S.polls.get("J37", 0) > 20,
+          (r.returncode, S.polls.get("J37"), r.stderr[-300:]))
     r = run(["call", "dev/render", "/render", '{"scenario":"stuck"}'], tmp)
     check("an unfamiliar status that doesn't change stops the wait after 20 polls (exit 2)",
           r.returncode == 2 and S.polls.get("J22") == 20 and "sc-job fetch dev/render J22" in r.stderr,
