@@ -35,7 +35,7 @@ Each step reports its own result in the answer's `route` object (`forward`, `cad
 | forward port | For a device whose target is `reverse-tunnel`, the registry allocates `slice_port` from the forward range (default 18001–18099). |
 | forward | Inside the gateway's sshd container, `ssh -fN -L 0.0.0.0:<slice_port>:localhost:<service_port>` runs through the device's tunnel. See [The forward module](#the-forward-module). |
 | Caddy | A site block for the route is appended to the Caddyfile and Caddy reloads through its admin API, falling back to its CLI. A failed reload rolls the file back. Caddy proxies to the gateway's container at `slice_port` for a tunnelled service, or straight to the device's address and port otherwise. |
-| DNS | With the `dns-namecheap` module on, an A record is added for the route. With it off, or under a bare address, the step is skipped and says so. See [DNS and TLS](DNS%20and%20TLS.md). |
+| DNS | With the `dns-namecheap` module on, an A record is added for the route. With it off, or under a bare address, the step is skipped and says so. It is also skipped when Caddy refused the route. A name that already points somewhere else (another address, or a CNAME) is left alone and the step fails; only the admin's request repoints it. See [DNS and TLS](DNS%20and%20TLS.md). |
 | service token | An `sc_service_` token for the service to operate itself. |
 | verify | The registry requests the external URL (plus the health endpoint, if any). Any HTTP answer, even 4xx or 5xx, counts as reachable. |
 

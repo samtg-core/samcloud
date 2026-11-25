@@ -154,12 +154,15 @@ def _has_record(records: list[dict], subdomain: str, record_type: str, address: 
 
 
 def add_record(subdomain: str, domain: str, record_type: str = "A",
-               address: str = None, ttl: str = "1800") -> tuple[bool, str]:
+               address: str = None, ttl: str = "1800", repoint: bool = False) -> tuple[bool, str]:
     """Add a DNS record, preserving all existing records.
 
     If address is None, uses current public IP (for A records).
     Verifies the record is present after writing; retries on clobber.
-    Returns (success, message).
+    A name that already has a record pointing somewhere else (another
+    address, or a CNAME, AAAA or ALIAS) is left alone unless repoint is set:
+    registering a service must not take over a name the plane doesn't run
+    (#1157, #44 review). Returns (success, message).
     """
     if address is None:
         address = _get_public_ip()
@@ -170,6 +173,18 @@ def add_record(subdomain: str, domain: str, record_type: str = "A",
             existing = get_records(domain)
         except Exception as e:
             return False, f"Failed to get existing records: {e}"
+
+        if not repoint:
+            other = [rec for rec in existing
+                     if rec["name"].lower() == subdomain.lower()
+                     and (rec["type"] in ("CNAME", "AAAA", "ALIAS", "URL", "URL301", "FRAME")
+                          or (rec["type"] == record_type and rec["address"] != address))]
+            if other:
+                where = ", ".join(f'{rec["type"]} {rec["address"]}' for rec in other)
+                audit("system:dns", "record.refused", f"{subdomain}.{domain}",
+                      {"type": record_type, "address": address, "existing": where})
+                return False, (f"{subdomain}.{domain} already points at {where}; not changed. "
+                               "Only the admin repoints an existing name.")
 
         action = None
         for rec in existing:

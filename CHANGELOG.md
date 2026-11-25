@@ -2,6 +2,12 @@
 
 What each release changed.
 
+## 2026-11-25 — Registering a service never takes over a DNS name that points elsewhere
+
+- **`dns.add_record` no longer repoints an existing record.** A name that already points somewhere other than the plane (another A address, or a CNAME, AAAA, ALIAS or URL record) is left alone, the DNS step fails with what it points at, and the refusal is audited (`record.refused`). Only the admin's request repoints a name (`repoint`). Before, registering a service with a subdomain repointed any such name to the plane, and the claim check only looked at registry routes, so a device manager could take a name in the zone the plane doesn't run (#44 review, #1157).
+- **The DNS step is skipped when Caddy refused the route**, on registration, route activation and slot activation. It says so in the `dns` result.
+- **The device-token `POST /services/register` checks the subdomain claim** and answers `409`, as `POST /services` does. Before, its route insert was silently ignored, and the service was stored advertising the other service's URL.
+- `docs/Services and Routes.md` says the DNS rules. Test: `registry/test_dns_no_repoint.py`. Each guard fails its tests when removed.
 ## 2026-11-25 — A service is published only under the plane's own domain
 
 - **`POST /services`, `POST /services/register` and `POST /routes` refuse a `domain` other than the plane's service domain** (`SAMCLOUD_DOMAIN`, else `PUBLIC_URL`'s host) for anyone but the admin: `403`. A service's `external_url` is built from that domain, and callers send their bearer to it, by hand or with `sc-job`. So a device manager naming another domain could have pointed every caller's token at a host the plane doesn't run (found in the #43 review, #1157). Every service registered today is under the plane's domain, and the admin keeps the choice. The domain is stored canonical (trimmed, lowercased, no trailing dot), and the subdomain claim check ignores case: Caddy lowercases hosts, so a stored `SAMTG.xyz` would have folded into the live `samtg.xyz` site behind the real proxy (#44 review). Test: `TestServiceDomain` in `registry/test_registry.py`, which fails with the check unwired or with the domain compared but stored as sent.
