@@ -21,7 +21,8 @@
 
 const KIND_PATH: Record<string, string> = { ticket: 'tickets', doc: 'docs', task: 'tasks' };
 
-/** Repos a short name may stand for. Anything else is written owner/repo#N. */
+/** Repos a short name may stand for. Anything else is written owner/repo#N: a new repo's
+ *  `repo PR N` links as a ticket until it is added here. */
 export const REPO_OWNER: Record<string, string> = {
   'samcloud': 'samtg-core', 'samcloud-services': 'samtg-core', 'samcloud-evals': 'samtg-core',
   'image-service': 'samtg-core', 'compute-watch': 'samtg-core',

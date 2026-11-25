@@ -15,6 +15,7 @@ CASES = [
     ("Unity-Service pr #16", [("Unity-Service pr #16", GH + "samtg-projects/unity-service/pull/16")]),
     ("samcloud pull request 49", [("samcloud pull request 49", GH + "samtg-core/samcloud/pull/49")]),
     ("samcloud#49", [("samcloud#49", GH + "samtg-core/samcloud/pull/49")]),
+    ("samcloud PR 49", [("samcloud PR 49", GH + "samtg-core/samcloud/pull/49")]),
     ("samtg-core/samcloud#47 merged", [("samtg-core/samcloud#47", GH + "samtg-core/samcloud/pull/47")]),
     ("other/thing#3", [("other/thing#3", GH + "other/thing/pull/3")]),
     ("on samcloud #1144 today", [("#1144", "/tickets/1144")]),

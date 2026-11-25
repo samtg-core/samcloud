@@ -426,7 +426,7 @@ DELETE /services/{id}             the service, its route, its DNS record and its
 - `version` as `<semver>+<sha>`, the same on every host running the same code;
 - `capabilities` in caller words (`image-generation`, `image-to-splat`);
 - a `description` written for a caller: the one call, its statuses, where results come from;
-- health: after 30 minutes without a report the entry reads `stale`, and `health_age_s` says how long. Callers use it when it's there.
+- health: after 30 minutes without a report, an `online` entry reads `stale`, and `health_age_s` says how long. Callers use it when it's there. Only `online` ages. An entry stored as `active`, or one that has never reported, reads as up although nothing checked it, so read `health_age_s` rather than the status.
 - in the guide, beyond the call: the inputs' limits, the errors, measured time and memory per call, and the hosts it runs on.
 
 scene-render (`wafer-services/scene-render`, doc 750 §3) is the worked example.

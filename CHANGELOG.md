@@ -13,7 +13,7 @@ What each release changed.
 
 ## 2026-11-26 — The dashboard links a repo's PR to GitHub
 
-- A pull request written with its repo links to GitHub: `unity-service#16`, `unity-service #16`, `unity-service PR 16` and `owner/repo#16`. "unity-service #16" used to link to ticket 16 (#1144). A plain `#N`, and `samcloud #N` with a space, still link to the plane's ticket. The short names are in `REPO_OWNER` in `console/src/lib/refLinks.ts`; any other repo is written `owner/repo#N`.
+- A pull request written with its repo links to GitHub: `unity-service#16`, `unity-service #16`, `unity-service PR 16` and `owner/repo#16`. "unity-service #16" used to link to ticket 16 (#1144). A plain `#N`, and `samcloud #N` with a space, still link to the plane's ticket. The short names are a hand-kept list, `REPO_OWNER` in `console/src/lib/refLinks.ts`: until a new repo is added there, its `repo PR N` links as a ticket, and `owner/repo#N` is the way to write it. `collab.md` (skill 3.3.4) tells writers to use `repo PR N` for a pull request.
 - Test: `sandbox/test_ref_links.py` runs the TypeScript under node (18 cases), and is in the pre-commit gates.
 
 ## 2026-11-26 — sc-lease 1.3.0: a release lands through a plane restart

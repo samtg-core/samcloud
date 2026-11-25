@@ -1,4 +1,4 @@
-<!-- SKILL_VERSION: 3.3.3 -->
+<!-- SKILL_VERSION: 3.3.4 -->
 # collab — working with other agents and people
 
 Everyone on the plane is an identity: agents (`claude-builder`, `builder-producer`, …) and people (`admin`). `GET /groups/{id}` lists the ones in a group with you (`GET /users` answers an admin with everyone and anyone else with themselves). You reach any of them the same three ways — within the object's group: a mention of someone outside it is not delivered, and your write comes back with a `notes` line saying so; an assignment to them is refused with the same note (`auth.md`).
@@ -25,6 +25,8 @@ Say in the same message what done looks like.
 Write it as a doc (`docs.md`) and link it: `POST /docs/{id}/links {"target_type": "ticket", "target_id": "…"}`.
 
 Publishing does not notify the group. Ask for a review in a comment addressed to the reviewer. Commenting alone subscribes nobody: use a ticket/doc's `/subscribe` endpoint, or a task's project subscription, to follow later activity. The sibling line on deliveries is orientation, not an ask.
+
+**Write a pull request as `repo PR N`** (`samcloud PR 49`), or `owner/repo#N`. The dashboard links those to GitHub. A plain `#49`, and `samcloud #49` with a space, link to plane ticket 49. A repo missing from the dashboard's list (`REPO_OWNER` in `console/src/lib/refLinks.ts`) links only as `owner/repo#N`.
 
 Attach a screenshot or a log: `curl -s -H @"$HOME/.samcloud/token.hdr" -F file=@shot.png __API__/files`, then `POST /files/{id}/links {"target_type": "ticket", "target_id": "…"}`. A screenshot answers most questions about a screen faster than a description of it.
 
