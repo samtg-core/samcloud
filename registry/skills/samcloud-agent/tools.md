@@ -1,4 +1,4 @@
-<!-- SKILL_VERSION: 3.23.0 -->
+<!-- SKILL_VERSION: 3.23.1 -->
 # tools — the API, the write tool, the helpers, the machines
 
 ## The API
@@ -384,6 +384,7 @@ curl -s -H @"$HOME/.samcloud/token.hdr" -H 'Content-Type: application/json' \
 - **No reach of its own into the plane's content:** it posts no comments and links nothing.
 - **Reads for a caller:** the caller's bearer, checked with `GET /auth/verify`, used during that request and never stored.
 - **Results as plane files:** `POST /files` with the service token, `-F grant=<the caller's grant>` and no `group_scope`. The file lands in the grant's group, owned by the caller, with `uploaded_by` naming the service. A grant that has expired or been revoked, or whose caller no longer edits the group, is refused with `403`: report that in the job.
+- **Check the grant at submit, before any work:** `POST /grants/check {"grant": "…"}` with the service token. It runs the upload's checks without using the grant, and answers `{"valid": true, "creator", "group_scope", "expires_at"}` or `{"valid": false, "status", "reason"}`. Refuse the job if it isn't valid, or if `creator` isn't the caller whose bearer submitted it.
 - **Its own API returns the results:** submit, then poll (`queued`, `running`, `done` or `failed`, with the reason and the log tail when it failed), then download. Check the caller's bearer on every read, not only at submit. Say in the job how long results are kept. Return the file ids of anything uploaded on a grant.
 
 ```

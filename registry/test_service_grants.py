@@ -120,3 +120,51 @@ class TestCallerGrants:
         assert g['group_scope'] == 'projects'   # the caller's default group
         assert other.delete(f"/api/v1/grants/{g['id']}").status_code == 404
         assert other.get('/api/v1/grants').json()['grants'] == []
+
+
+class TestGrantCheck:
+    """POST /grants/check: the named service asks whether a grant would upload
+    now, without using it (task 1450)."""
+
+    def _check(self, c, grant, **kw):
+        return c.post('/api/v1/grants/check', json={'grant': grant, **kw})
+
+    def test_a_live_grant_checks_valid_names_its_creator_and_is_not_used(self, client):
+        caller, _, svc, _ = _setup(client)
+        g = caller.post('/api/v1/grants', json={'service_id': 'box/render', 'group_scope': 'projects'}).json()
+        r = self._check(svc, g['grant'])
+        assert r.status_code == 200, r.text
+        body = r.json()
+        assert body['valid'] is True
+        assert (body['id'], body['creator'], body['group_scope']) == (g['id'], 'caller', 'projects')
+        assert body['expires_at'] == g['expires_at'] and 'grant' not in body
+        self._check(svc, g['grant'], group_scope='projects')
+        assert caller.get('/api/v1/grants').json()['grants'][0]['uses'] == 0
+        assert _upload(svc, grant=g['grant']).status_code == 200
+
+    def test_it_answers_the_refusal_an_upload_would_get(self, client):
+        caller, _, svc, svc2 = _setup(client)
+        mint = lambda: caller.post('/api/v1/grants', json={'service_id': 'box/render', 'group_scope': 'projects'}).json()
+        g = mint()
+        assert self._check(svc, 'sc_grant_made-up').json() == {
+            'valid': False, 'status': 403, 'reason': 'This grant is not for this service'}
+        assert self._check(svc2, g['grant']).json()['valid'] is False            # another service
+        r = self._check(svc, g['grant'], group_scope='work').json()
+        assert (r['valid'], r['status']) == (False, 422)
+        assert caller.delete(f"/api/v1/grants/{g['id']}").status_code == 200
+        assert self._check(svc, g['grant']).json()['reason'] == 'This grant was revoked'
+        g = mint()
+        past = (datetime.now(timezone.utc) - timedelta(seconds=1)).isoformat()
+        db.execute("UPDATE service_grants SET expires_at = ? WHERE id = ?", (past, g['id']))
+        assert self._check(svc, g['grant']).json()['valid'] is False
+        g = mint()
+        uid = db.query_one("SELECT id FROM users WHERE username = 'caller'")['id']
+        assert client.patch(f'/api/v1/groups/projects/members/{uid}', json={'role': 'viewer'}).status_code == 200
+        assert self._check(svc, g['grant']).json()['valid'] is False
+
+    def test_only_a_service_token_may_check(self, client):
+        caller, other, _, _ = _setup(client)
+        g = caller.post('/api/v1/grants', json={'service_id': 'box/render', 'group_scope': 'projects'}).json()
+        assert self._check(caller, g['grant']).status_code == 403
+        assert self._check(other, g['grant']).status_code == 403
+        assert self._check(client, g['grant']).status_code == 403
