@@ -178,7 +178,7 @@ SCENARIOS = {"ok": "J1", "fail": "J2", "escape": "J3", "redirect": "J4", "cancel
              "rate": "J14", "truncated": "J15", "lost404": "J16", "lost": "J17", "nostatus": "J18", "unicode": "J19",
              "echo": "J20", "leaky": "J38", "leakyfail": "J39", "embeds": "J40", "many": "J41",
              "percent": "J42", "flap": "J43", "heartbeat": "J44", "queue": "J45", "gaps": "J46",
-             "absdup": "J47", "failres": "J48", "busy": "J21", "stuck": "J22", "longrun": "J23", "blank": "J24", "error": "J25",
+             "absdup": "J47", "failres": "J48", "cutstage": "J49", "cutfail": "J50", "busy": "J21", "stuck": "J22", "longrun": "J23", "blank": "J24", "error": "J25",
              "big": "J27", "chunked": "J28", "shortbig": "J29", "dropdl": "J30", "truncdl": "J31",
              "resetdl": "J32", "slowdl": "J33", "patchy": "J34", "mixed": "J35", "list": "J36",
              "inching": "J37"}
@@ -286,6 +286,13 @@ def job_doc(job, n):
             return {"job": job, "status": "running", "stage": f"checking {grant}"}
         return {"job": job, "status": "done", "plane_error": f"upload refused for {grant}",
                 "results": [f"/jobs/{job}/files/{grant}.txt", f"/jobs/{job}/files/sc_grant_report-2026.txt"]}
+    if job in ("J49", "J50"):                     # the grant echoed across where sc-job cuts the text
+        grant = (S.bodies.get(job) or {}).get("grant", "")
+        if job == "J50":
+            return {"job": job, "status": "failed", "error": "z" * 260 + grant}
+        if n == 0:
+            return {"job": job, "status": "running", "stage": "y" * 50 + grant}
+        return {"job": job, "status": "done", "results": []}
     if job == "J20":                              # echoes the request it was given, grant and all
         return {"job": job, "status": "done", "results": [], "request": S.bodies.get(job)}
     if job == "J19":
@@ -306,6 +313,8 @@ class Service(Base):
             return self.send(422, {"detail": [{"type": "extra_forbidden", "loc": ["body", "grant"],
                                                "msg": "Extra inputs are not permitted", "input": body.get("grant")},
                                               {"type": "also", "input": body.get("grant")}]})
+        if scenario == "cut400":                 # the grant echoed across the 300-character cut
+            return self.send(400, {"error": "x" * 260 + body.get("grant", "")})
         if scenario == "submit500":
             return self.send(500, {"error": "can't take it"})
         if scenario == "submit503":              # counted on its own: the 5xx-is-not-re-sent check
@@ -958,6 +967,14 @@ def main():
     check("a failed job's error that echoes the grant is redacted in the summary (exit 1)",
           r.returncode == 1 and "· refused grant sc_grant_[redacted]" in r.stdout and not leaked(r.stdout + r.stderr),
           (r.returncode, r.stdout))
+
+    for scenario, what, code in (("cut400", "a submit error", 2), ("cutstage", "a progress stage (cut at 80)", 0),
+                                 ("cutfail", "a failed job's error", 1)):
+        r = run(["call", "dev/render", "/render", json.dumps({"scenario": scenario}), "--store", "projects",
+                 "--out", f"o-{scenario}"], tmp)
+        check(f"a grant straddling where sc-job cuts {what} is hidden whole, not printed in part",
+              r.returncode == code and not leaked(r.stdout + r.stderr) and "sc_grant_[redacted]" in r.stdout + r.stderr,
+              (r.returncode, r.stdout[-400:], r.stderr[-400:]))
 
     print("sc-job — downloads retried, and stopped")
     for scenario, job, what in (("dropdl", "J30", "no status line (RemoteDisconnected)"),

@@ -153,8 +153,9 @@ class Redacted:
 
 
 def clean(value, limit=300):
-    """An untrusted string, safe to print: escape sequences and control characters removed."""
-    s = CONTROL.sub(" ", ANSI.sub("", str(value)))
+    """An untrusted string, safe to print: escape sequences and control characters removed, and any
+    grant secret hidden before the cut, so a secret straddling it can't print in part."""
+    s = GRANT_SECRET.sub("sc_grant_[redacted]", CONTROL.sub(" ", ANSI.sub("", str(value))))
     return s[:limit] + ("…" if len(s) > limit else "")
 
 
