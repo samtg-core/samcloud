@@ -255,6 +255,8 @@ Internal wiring between the containers, build stamps, the ports of the test devi
 | `SEED_ADMIN_PASS` | `admin123` | `deploy/seed.sh` only: that user's password. Seed a test plane only; never a plane anyone else can reach. |
 | `ENV` | the plane's `SAMCLOUD_ENV` | `bootstrap.sh` only: a shell variable the script sets from the value the registry fills in. Not a setting. |
 | `TMPSCRIPT` | — | `bootstrap.sh` only: a shell variable holding the temp copy the script makes of itself when piped from `curl`. Not a setting. |
+| `TERMUX_VERSION` | — | `bootstrap.sh` only: set by the Termux app on Android. When it is present, or `PREFIX` is under `com.termux`, the script installs for Termux: no root, `/tmp`, sudo or systemd. Not a setting. |
+| `PREFIX` | — | `bootstrap.sh` only: Termux's userland root, set by the Termux app. The script detects Termux from it and installs the tunnel runner under it. Not a setting. |
 | `PRESSURE` | — | `resource-bootstrap.sh` only: a shell variable the stats daemon sets from macOS `memory_pressure`, falling back to `50`. Not a setting. |
 
 ## Related
