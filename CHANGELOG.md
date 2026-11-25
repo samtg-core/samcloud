@@ -2,6 +2,11 @@
 
 What each release changed.
 
+## 2026-11-25 — sc-job: call any service in one command
+
+- **`sc-job`** (`GET /api/v1/helpers/job`, JOB_VERSION 1.0.0) is the caller side of a service, bundled (#1157). `sc-job call <service id> <submit path> BODY` finds the service's address in `GET /services/{id}`, submits, polls until `done`, `failed` or `cancelled`, and downloads every file the job's `results` name. `--store GROUP` mints a grant for that service and group, adds it to the body, and revokes it however the job ends; the summary lists the plane files by role and a line to embed the first image. `list`, `status` and `cancel` round it out. The bearer goes only to the plane and the service's own address, never on a redirect to another host, and a results path that leaves the job's files is refused. Python 3 standard library only; `wake-install` fetches it where the registry serves it.
+- `tools.md` (skill 3.24.0): the helpers table lists `job`; "Find and call a service" has the one-command form; "Register a service" states the shape `sc-job` relies on.
+- Test: `sandbox/test_sc_job.py` (a fake plane and service on loopback).
 ## 2026-11-25 — Registering a service never takes over a DNS name that points elsewhere
 
 - **`dns.add_record` no longer repoints an existing record.** A name that already points somewhere other than the plane (another A address, or a CNAME, AAAA, ALIAS or URL record) is left alone, the DNS step fails with what it points at, and the refusal is audited (`record.refused`). Only the admin's request repoints a name (`repoint`). Before, registering a service with a subdomain repointed any such name to the plane, and the claim check only looked at registry routes, so a device manager could take a name in the zone the plane doesn't run (#44 review, #1157).

@@ -1,0 +1,391 @@
+#!/usr/bin/env python3
+# JOB_VERSION: 1.0.0
+# Served as GET /api/v1/helpers/job. Install from the plane you call from:
+#   curl -s -H @"$HOME/.samcloud/__TOKEN_HDR__" __API__/helpers/job > ~/.local/bin/sc-job && chmod +x ~/.local/bin/sc-job
+"""sc-job — call a service on the plane: submit a job, wait for it, keep what it made.
+
+    sc-job list                                         services you can see: id, health, address, what it does
+    sc-job call <service id> <submit path> [BODY] [--store GROUP] [--ttl S] [--out DIR] [--no-wait] [--json]
+                                                        BODY is JSON, @file or - (stdin); default {}
+    sc-job status <service id> <job> [--poll PATH]      the job as the service reports it
+    sc-job cancel <service id> <job> [--poll PATH]      withdraw a queued job, or delete a finished one
+
+    sc-job call wafer-services/scene-render /render '{"scene":"<id>","mode":"quick"}' --store projects
+
+`call` finds the service's address in `GET /services/{id}`, submits BODY to
+<submit path> there, polls until the job is `done`, `failed` or `cancelled`,
+and on `done` downloads every file the job's `results` name into --out
+(default ./<job>). It prints the files, and with --store the plane files you
+now own and a line to embed the first image.
+
+--store GROUP mints a grant for that service and that plane group (one you
+edit, from `GET /groups`), adds it to BODY as "grant", and revokes it when the
+job ends, however it ends. --ttl is the grant's life (default 7200 s). With
+--no-wait it prints the job id, leaves the grant live, and says how to revoke it.
+
+What a service has to answer (tools.md, "Register a service"): the submit reply
+names `job` (and may name `poll`, else /jobs/<job>); the poll answers `status`,
+with `error` when it failed; `results` names each file by its path under
+<poll>/files/; `plane_files` holds what it stored on your grant; DELETE on the
+poll path withdraws the job.
+
+Exit: 0 done · 1 failed or cancelled · 2 usage, refusal or HTTP error.
+
+Where it calls (as sc-say): --plane NAME (a plane the serving plane names) > $SAMCLOUD_API
+  > API= in ~/.config/samcloud/wake.env > the plane this copy was served from.
+Auth — a 0600 header file, never the bearer on a command line (#582):
+  --hdr FILE > $SAMCLOUD_AUTH_HDR > ~/.samcloud/token.hdr
+The bearer goes only to the plane and to the service's own address. It is never
+printed, and never sent on a redirect to another host. Python 3 standard library only.
+"""
+import argparse
+import json
+import os
+import pathlib
+import re
+import sys
+import time
+import urllib.error
+import urllib.parse
+import urllib.request
+
+PROG = "sc-job"
+TERMINAL = ("done", "failed", "cancelled")
+try:
+    _PLANES = json.loads('__PLANES_JSON__')
+except ValueError:          # an unrendered copy, run from a checkout
+    _PLANES = {}
+_SERVED_API = "__API__"
+JOB_ID = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$")
+REL_FILE = re.compile(r"^[A-Za-z0-9_][A-Za-z0-9._-]*(/[A-Za-z0-9_][A-Za-z0-9._-]*)*$")
+# Poll back-off, seconds: start, ceiling. SC_JOB_POLL_S="start,ceiling" tunes it.
+try:
+    POLL_MIN, POLL_MAX = (float(x) for x in os.environ.get("SC_JOB_POLL_S", "5,15").split(","))
+except ValueError:
+    POLL_MIN, POLL_MAX = 5.0, 15.0
+
+
+def die(msg, code=2):
+    print(f"{PROG}: {msg}", file=sys.stderr)
+    sys.exit(code)
+
+
+def note(msg):
+    print(msg, file=sys.stderr, flush=True)
+
+
+def plane_api(plane):
+    if plane:
+        if plane not in _PLANES:
+            die(f"unknown plane {plane!r} (this copy knows: {', '.join(_PLANES) or 'none'})")
+        api = _PLANES[plane]
+    else:
+        seat = ""
+        try:
+            for line in (pathlib.Path.home() / ".config/samcloud/wake.env").read_text().splitlines():
+                if line.startswith("API="):
+                    seat = line[4:].strip().strip('"')
+                    break
+        except OSError:
+            pass
+        served = "" if _SERVED_API == "__" + "API" + "__" else _SERVED_API
+        api = os.environ.get("SAMCLOUD_API") or seat or served
+    if not api:
+        die("no API: this copy was not served by a registry and the seat has no wake.env; "
+            "install it with: curl -s -H @\"$HOME/.samcloud/token.hdr\" <API>/helpers/job > ~/.local/bin/sc-job")
+    api = api.rstrip("/")
+    return api if api.endswith("/api/v1") else api + "/api/v1"
+
+
+def bearer(hdr):
+    candidates = [hdr or "", os.environ.get("SAMCLOUD_AUTH_HDR", ""),
+                  str(pathlib.Path.home() / ".samcloud" / "__TOKEN_HDR__"),
+                  str(pathlib.Path.home() / ".samcloud" / "token.hdr")]
+    for c in candidates:
+        if c and os.path.isfile(c) and os.access(c, os.R_OK):
+            for line in pathlib.Path(c).read_text().splitlines():
+                name, _, value = line.partition(":")
+                if name.strip().lower() == "authorization" and value.strip():
+                    return value.strip()
+    die("no samcloud header file (--hdr, SAMCLOUD_AUTH_HDR or ~/.samcloud/token.hdr)")
+
+
+class SameHostRedirects(urllib.request.HTTPRedirectHandler):
+    """The bearer is never sent on a redirect to another host or scheme."""
+
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        new = super().redirect_request(req, fp, code, msg, headers, newurl)
+        old, nu = urllib.parse.urlsplit(req.full_url), urllib.parse.urlsplit(newurl)
+        if new is not None and (nu.scheme, nu.netloc) != (old.scheme, old.netloc):
+            new.headers.pop("Authorization", None)
+            new.unredirected_hdrs.pop("Authorization", None)
+        return new
+
+
+class Client:
+    def __init__(self, api, auth):
+        self.api, self.auth = api, auth
+        self.opener = urllib.request.build_opener(SameHostRedirects)
+        self.allowed = {self.origin(api)}
+
+    @staticmethod
+    def origin(url):
+        u = urllib.parse.urlsplit(url)
+        return (u.scheme, u.netloc)
+
+    def call(self, method, url, body=None, raw=False, timeout=60):
+        if self.origin(url) not in self.allowed:
+            die(f"refusing to send your token to {urllib.parse.urlsplit(url).netloc}")
+        data = None if body is None else json.dumps(body).encode()
+        req = urllib.request.Request(url, data=data, method=method, headers={"Authorization": self.auth})
+        if data is not None:
+            req.add_header("Content-Type", "application/json")
+        try:
+            with self.opener.open(req, timeout=timeout) as r:
+                payload = r.read()
+        except urllib.error.HTTPError as e:
+            try:
+                err = json.loads(e.read())
+                msg = err.get("error") or err.get("detail") if isinstance(err, dict) else None
+            except Exception:
+                msg = None
+            die(f"{method} {url.split('?')[0]} → {e.code}: {msg or e.reason}")
+        except urllib.error.URLError as e:
+            die(f"can't reach {urllib.parse.urlsplit(url).netloc}: {e.reason}")
+        if raw:
+            return payload
+        try:
+            return json.loads(payload) if payload.strip() else {}
+        except ValueError:
+            die(f"{method} {url.split('?')[0]} did not answer JSON")
+
+
+def service_base(c, service):
+    s = c.call("GET", f"{c.api}/services/{urllib.parse.quote(service, safe='')}")
+    url = (s.get("external_url") or "").rstrip("/")
+    if not url:
+        die(f"{service} has no external_url: it can't be called from here")
+    u = urllib.parse.urlsplit(url)
+    loopback = u.hostname in ("localhost", "127.0.0.1", "::1")
+    if u.scheme != "https" and not (u.scheme == "http" and loopback):
+        die(f"{service} answers at {url}; refusing to send your token over {u.scheme or 'no scheme'}")
+    c.allowed.add(c.origin(url))
+    return url
+
+
+def safe_path(path, what):
+    """A path on the service: absolute, no scheme or host, no '..' segment."""
+    if (not isinstance(path, str) or not path.startswith("/") or path.startswith("//")
+            or "://" in path or "\\" in path or ".." in path.split("/") or "?" in path or "#" in path):
+        die(f"refusing an unexpected {what} from the service: {str(path)[:120]!r}")
+    return path
+
+
+def job_id(j):
+    if not isinstance(j, str) or not JOB_ID.match(j):
+        die(f"not a job id: {str(j)[:80]!r}")
+    return j
+
+
+def walk(value):
+    if isinstance(value, str):
+        yield value
+    elif isinstance(value, dict):
+        for v in value.values():
+            yield from walk(v)
+    elif isinstance(value, list):
+        for v in value:
+            yield from walk(v)
+
+
+def result_files(j, base, poll):
+    """Relative names of the files `results` names under <poll>/files/. A path that
+    starts there and then leaves it is refused, not skipped."""
+    prefix = poll.rstrip("/") + "/files/"
+    out = []
+    for s in walk(j.get("results")):
+        if s.startswith(base + "/"):
+            s = s[len(base):]
+        if not s.startswith(prefix):
+            continue
+        rel = urllib.parse.unquote(s[len(prefix):])
+        if not REL_FILE.match(rel) or ".." in rel.split("/"):
+            die(f"refusing a file path outside the job's files: {s[:120]!r}")
+        if rel not in out:
+            out.append(rel)
+    return out
+
+
+def download(c, base, poll, rels, out):
+    out.mkdir(parents=True, exist_ok=True)
+    root = out.resolve()
+    for rel in rels:
+        dest = (out / rel).resolve()
+        if root not in dest.parents:
+            die(f"refusing to write outside {out}: {rel!r}")
+        data = c.call("GET", f"{base}{poll.rstrip('/')}/files/{urllib.parse.quote(rel)}", raw=True, timeout=300)
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        dest.write_bytes(data)
+
+
+def flatten(value, role=""):
+    if isinstance(value, bool):
+        return
+    if isinstance(value, int) or (isinstance(value, str) and value.isdigit()):
+        yield role or "file", int(value)
+    elif isinstance(value, dict):
+        for k, v in value.items():
+            yield from flatten(v, f"{role}/{k}" if role else str(k))
+    elif isinstance(value, list):
+        for i, v in enumerate(value):
+            yield from flatten(v, f"{role}[{i}]")
+
+
+def wait(c, base, poll, job):
+    last, delay = None, POLL_MIN
+    while True:
+        j = c.call("GET", base + poll)
+        status = j.get("status")
+        pos = j.get("position") if j.get("position") is not None else j.get("gpu_position")
+        now = (status, j.get("stage"), pos)
+        if now != last:
+            where = j.get("stage") or status
+            note(f"  {time.strftime('%H:%M:%S')} {job} {where}" + (f", position {pos}" if pos else ""))
+            last, delay = now, POLL_MIN
+        else:
+            delay = min(POLL_MAX, delay + POLL_MIN)
+        if status in TERMINAL:
+            return j
+        time.sleep(delay)
+
+
+def first_image(c, ids):
+    for fid in ids[:3]:
+        f = c.call("GET", f"{c.api}/files/{fid}")
+        if str(f.get("content_type") or "").startswith("image/"):
+            return fid
+    return None
+
+
+def summary(c, j, job, out, rels):
+    times = ", ".join(f"{k[:-2]} {j[k]} s" for k in ("waited_s", "render_s", "run_s") if j.get(k) is not None)
+    line = f"job {job}: {j.get('status')}" + (f" · {times}" if times else "")
+    if j.get("status") != "done" and j.get("error"):
+        line += f" · {j['error']}"
+    print(line)
+    if rels:
+        shown = ", ".join(rels[:6]) + (f", … ({len(rels)} in all)" if len(rels) > 6 else "")
+        print(f"files in {out}/: {shown}")
+    pf = list(flatten(j.get("plane_files")))
+    if pf:
+        print("plane files you own:")
+        for role, fid in pf:
+            print(f"  {role} {fid}")
+        img = first_image(c, [fid for _, fid in pf])
+        if img is not None:
+            print(f"embed: ![](/api/v1/files/{img}/raw)")
+    if j.get("plane_error"):
+        print(f"plane upload: {j['plane_error']}")
+    if j.get("expires"):
+        print(f"kept on the service until {j['expires']}")
+
+
+def read_body(arg):
+    if arg is None:
+        return {}
+    text = sys.stdin.read() if arg == "-" else (pathlib.Path(arg[1:]).read_text() if arg.startswith("@") else arg)
+    try:
+        return json.loads(text)
+    except ValueError as e:
+        die(f"BODY is not JSON: {e}")
+
+
+def cmd_call(c, a):
+    base = service_base(c, a.service)
+    submit = safe_path(a.path, "submit path")
+    body = read_body(a.body)
+    grant = None
+    if a.store:
+        if not isinstance(body, dict):
+            die("--store needs BODY to be a JSON object, to carry the grant")
+        grant = c.call("POST", f"{c.api}/grants",
+                       {"service_id": a.service, "group_scope": a.store, "ttl_s": a.ttl})
+        body["grant"] = grant["grant"]
+    job = None
+    try:
+        sub = c.call("POST", base + submit, body)
+        job = job_id(sub.get("job"))
+        poll = safe_path(sub["poll"], "poll path") if sub.get("poll") else f"/jobs/{job}"
+        note(f"{PROG}: job {job} submitted to {a.service}" + (f", storing into {a.store}" if a.store else ""))
+        if a.no_wait:
+            print(job)
+            if grant:
+                note(f"grant {grant['id']} stays live until {grant.get('expires_at')}; once the job is done:\n"
+                     f"  curl -s -H @\"$HOME/.samcloud/token.hdr\" -X DELETE {c.api}/grants/{grant['id']}")
+            return 0
+        j = wait(c, base, poll, job)
+    except KeyboardInterrupt:
+        if job:
+            note(f"\n{PROG}: stopped waiting; job {job} carries on at the service "
+                 f"(sc-job status {a.service} {job})")
+        return 2
+    finally:
+        if grant and not a.no_wait:
+            c.call("DELETE", f"{c.api}/grants/{grant['id']}")
+    out = pathlib.Path(a.out or job)
+    rels = []
+    if j.get("status") == "done":
+        rels = result_files(j, base, poll)
+        download(c, base, poll, rels, out)
+    if a.json:
+        print(json.dumps(j, indent=1))
+    else:
+        summary(c, j, job, out, rels)
+    return 0 if j.get("status") == "done" else 1
+
+
+def cmd_list(c, a):
+    rows = c.call("GET", f"{c.api}/services")
+    for s in rows if isinstance(rows, list) else rows.get("services", []):
+        desc = re.split(r"(?<=[.!?])\s|\n", (s.get("description") or "").strip(), maxsplit=1)[0][:120]
+        print(f"{s.get('id')}  {s.get('last_health_status') or '-'}  {s.get('external_url') or '-'}  {desc}")
+    return 0
+
+
+def main():
+    ap = argparse.ArgumentParser(prog=PROG, description=__doc__.split("\n\n")[0],
+                                 formatter_class=argparse.RawDescriptionHelpFormatter)
+    ap.add_argument("--plane", help="a plane the serving plane names")
+    ap.add_argument("--hdr", help="the 0600 header file holding your bearer")
+    sub = ap.add_subparsers(dest="cmd", required=True)
+    sub.add_parser("list", help="services you can see")
+    p = sub.add_parser("call", help="submit a job, wait for it, download what it made")
+    p.add_argument("service", help="service id, as in GET /services (e.g. wafer-services/scene-render)")
+    p.add_argument("path", help="the service's submit path (e.g. /render)")
+    p.add_argument("body", nargs="?", help="JSON, @file or - for stdin (default {})")
+    p.add_argument("--store", metavar="GROUP", help="also keep the results as plane files you own, in GROUP")
+    p.add_argument("--ttl", type=int, default=7200, help="the grant's life in seconds (default 7200)")
+    p.add_argument("--out", help="download into this folder (default ./<job>)")
+    p.add_argument("--no-wait", action="store_true", help="submit, print the job id and return")
+    p.add_argument("--json", action="store_true", help="print the final job as JSON instead of a summary")
+    for name, h in (("status", "a job's state"), ("cancel", "withdraw or delete a job")):
+        q = sub.add_parser(name, help=h)
+        q.add_argument("service")
+        q.add_argument("job")
+        q.add_argument("--poll", help="the job's path, if not /jobs/<job>")
+    a = ap.parse_args()
+    c = Client(plane_api(a.plane), bearer(a.hdr))
+    if a.cmd == "list":
+        return cmd_list(c, a)
+    if a.cmd == "call":
+        if a.ttl <= 0:
+            die("--ttl must be positive")
+        return cmd_call(c, a)
+    base = service_base(c, a.service)
+    poll = safe_path(a.poll, "poll path") if a.poll else f"/jobs/{job_id(a.job)}"
+    print(json.dumps(c.call("GET" if a.cmd == "status" else "DELETE", base + poll), indent=1))
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

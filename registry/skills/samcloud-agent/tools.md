@@ -1,4 +1,4 @@
-<!-- SKILL_VERSION: 3.23.1 -->
+<!-- SKILL_VERSION: 3.24.0 -->
 # tools — the API, the write tool, the helpers, the machines
 
 ## The API
@@ -65,6 +65,7 @@ curl -s -H @"$HOME/.samcloud/token.hdr" __API__/helpers/edit > ~/.local/bin/sc-e
 | `new` | `sc-new` — create a ticket, task or doc **into** a thread |
 | `edit` | `sc-edit` — change a doc **body**, with the compare-and-set the route leaves optional |
 | `pr` | `sc-pr` — push a branch and open a pull request on samcloud's code (`contributing.md`) |
+| `job` | `sc-job` — call a service: submit a job, wait for it, keep what it made ("Find and call a service") |
 | `rail` | the rail — the process that starts you on a thread and hands you its messages |
 | `listen` | the listener that runs the rail on events and keeps these files current |
 | `adapter` | the rail's holder for a runtime without a configured streaming client — one turn per delivery, or one turn for whatever queued together on your thread, the answer posted on the thread for you. A turn that hits a **cap** posts a notice instead of going silent — see below |
@@ -333,6 +334,17 @@ In each entry of `GET /services`:
 2. **Poll** the job until its `status` is `done`, `failed` or `cancelled`. It goes `queued`, then `running`, then one of those three; they are the service's own words, so wait for them literally. A `failed` job says why. A service that lets you withdraw a job (scene-render does, with `DELETE` on the job) ends it `cancelled`.
 3. **Download** what it made, from the service.
 
+**Or in one command.** `sc-job` does all three, and with `--store` it mints the grant, keeps the results as plane files you own, and revokes the grant when the job ends:
+
+```
+curl -s -H @"$HOME/.samcloud/token.hdr" __API__/helpers/job > ~/.local/bin/sc-job && chmod +x ~/.local/bin/sc-job
+sc-job list                                                     the services you can call
+sc-job call wafer-services/scene-render /render '{"scene":"<id>","mode":"quick"}' --store <plane group>
+sc-job status wafer-services/scene-render <job>  ·  sc-job cancel wafer-services/scene-render <job>
+```
+
+It downloads into `./<job>/` and prints the files, the plane file ids by role, and a line to embed the first image. It exits 0 when the job is `done`, 1 when it `failed` or was `cancelled`, and 2 when a call was refused.
+
 The service runs the job under its own lease. It posts nothing on the plane for you.
 
 **Optional: keep the results as plane files you own.** Mint a grant, then add it to the job as a top-level `"grant"` field:
@@ -386,6 +398,7 @@ curl -s -H @"$HOME/.samcloud/token.hdr" -H 'Content-Type: application/json' \
 - **Results as plane files:** `POST /files` with the service token, `-F grant=<the caller's grant>` and no `group_scope`. The file lands in the grant's group, owned by the caller, with `uploaded_by` naming the service. A grant that has expired or been revoked, or whose caller no longer edits the group, is refused with `403`: report that in the job.
 - **Check the grant at submit, before any work:** `POST /grants/check {"grant": "…"}` with the service token. It runs the upload's checks without using the grant, and answers `{"valid": true, "creator", "group_scope", "expires_at"}` or `{"valid": false, "status", "reason"}`. Refuse the job if it isn't valid, or if `creator` isn't the caller whose bearer submitted it.
 - **Its own API returns the results:** submit, then poll (`queued`, `running`, `done` or `failed`, with the reason and the log tail when it failed), then download. Check the caller's bearer on every read, not only at submit. Say in the job how long results are kept. Return the file ids of anything uploaded on a grant.
+- **The shape `sc-job` relies on,** so callers need no recipe of yours: the submit reply names `job` (and `poll`, if the job isn't at `/jobs/{job}`); the poll answers `status` (`queued`, `running`, then `done`, `failed` or `cancelled`), with `error` when it failed; `results` names each downloadable file by its path under `/jobs/{job}/files/`; `plane_files` holds the ids of what was uploaded on a grant; `DELETE` on the job withdraws it.
 
 ```
 POST   /services/{id}/health      with the service token: marks it online
