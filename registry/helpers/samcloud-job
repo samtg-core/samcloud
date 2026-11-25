@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# JOB_VERSION: 1.0.0
+# JOB_VERSION: 1.0.1
 # Served as GET /api/v1/helpers/job. Install from the plane you call from:
 #   curl -s -H @"$HOME/.samcloud/__TOKEN_HDR__" __API__/helpers/job > ~/.local/bin/sc-job && chmod +x ~/.local/bin/sc-job
 """sc-job — call a service on the plane: submit a job, wait for it, keep what it made.
@@ -19,8 +19,9 @@
 <submit path> there, and polls until the job ends. It keeps waiting through
 dropped connections and 5xx answers, backing off up to a minute. On `done` it
 downloads every file the job's `results` name into --out (default ./<job>),
-and prints the files, the plane files you now own by role, and a line to embed
-the first image.
+and prints the files, then each plane file you now own: its role, its id and
+the markdown that embeds it. Those are already your files on the plane; paste
+the markdown, don't upload the downloads again.
 
 The job ends `done`, or as a failure: `failed`, `cancelled` (or `canceled`),
 `error` or `expired`. `queued` and `running` are waited out. Any other status,
@@ -76,6 +77,7 @@ WAITING = ("queued", "running")
 UNKNOWN_WARN_AFTER = 3     # polls with an unfamiliar status before it is named
 UNKNOWN_LIMIT = 20         # ... and before sc-job stops waiting
 POLL_BAD_LIMIT = 5         # polls in a row answering an error or no JSON
+EMBED_LIMIT = 24           # plane files whose record sc-job reads for their markdown
 try:
     _PLANES = json.loads('__PLANES_JSON__')
 except ValueError:          # an unrendered copy, run from a checkout
@@ -471,16 +473,22 @@ def progress(job, j):
     note(f"  {time.strftime('%H:%M:%S')} {job} {where}" + (f", position {clean(pos, 12)}" if pos else ""))
 
 
-def first_image(c, ids):
-    """Best effort: the first of up to three ids that the plane says is an image."""
-    for fid in ids[:3]:
+def embed(c, role, fid, look=True):
+    """The markdown for one plane file: the plane's own, if it points at that file, else built here."""
+    raw = f"/api/v1/files/{fid}/raw"
+    f = {}
+    if look:
         try:
             f = c.call("GET", f"{c.api}/files/{fid}", tries=1)
         except CallError:
-            continue
-        if str(f.get("content_type") or "").startswith("image/"):
-            return fid
-    return None
+            f = {}
+    md = f.get("markdown") if isinstance(f, dict) else None
+    if isinstance(md, str) and md.endswith(f"]({raw})") and md.isprintable() and len(md) <= 300:
+        return md
+    name = clean((f.get("name") if isinstance(f, dict) else None) or role.rsplit("/", 1)[-1], 80)
+    name = name.replace("[", "(").replace("]", ")")
+    image = str((f.get("content_type") if isinstance(f, dict) else "") or "").startswith("image/")
+    return f"{'!' if image else ''}[{name}]({raw})"
 
 
 def summary(c, j, job, out, rels):
@@ -495,12 +503,9 @@ def summary(c, j, job, out, rels):
         print(f"files in {out}/: {shown}")
     pf = list(flatten(j.get("plane_files")))
     if pf:
-        print("plane files you own:")
-        for role, fid in pf:
-            print(f"  {role} {fid}")
-        img = first_image(c, [fid for _, fid in pf])
-        if img is not None:
-            print(f"embed: ![](/api/v1/files/{img}/raw)")
+        print("plane files you own, already on the plane (paste the markdown; don't upload the downloads again):")
+        for n, (role, fid) in enumerate(pf):
+            print(f"  {role} {fid}  {embed(c, role, fid, look=n < EMBED_LIMIT)}")
     if j.get("plane_error"):
         print(f"plane upload: {clean(j['plane_error'])}")
     if j.get("expires"):

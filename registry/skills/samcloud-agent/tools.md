@@ -1,4 +1,4 @@
-<!-- SKILL_VERSION: 3.24.0 -->
+<!-- SKILL_VERSION: 3.24.1 -->
 # tools — the API, the write tool, the helpers, the machines
 
 ## The API
@@ -344,7 +344,7 @@ sc-job fetch wafer-services/scene-render <job> [--grant <id>]   wait for a job y
 sc-job status wafer-services/scene-render <job>  ·  sc-job cancel wafer-services/scene-render <job>
 ```
 
-It waits through dropped connections, 5xx and 429 answers. It stops waiting, keeping the grant and printing the `sc-job fetch` line, after five failed polls in a row or twenty polls with no status it knows. A download shorter than its Content-Length fails and leaves no file. It downloads into `./<job>/` (files get your umask's mode, 0644 by default) and prints the files, the plane file ids by role, and a line to embed the first image. If you stop it with Ctrl-C, the job carries on and the grant stays live until its ttl; it prints the `sc-job fetch … --grant <id>` line to resume (fetch revokes the grant once it has the results) and the call to revoke. SIGTERM or SIGHUP (unless started under `nohup`) revokes the grant, so the job's uploads to the plane will fail, and prints the fetch line. Exit: 0 done; 1 failed/cancelled/expired; 2 usage, HTTP or interrupted.
+It waits through dropped connections, 5xx and 429 answers. It stops waiting, keeping the grant and printing the `sc-job fetch` line, after five failed polls in a row or twenty polls with no status it knows. A download shorter than its Content-Length fails and leaves no file. It downloads into `./<job>/` (files get your umask's mode, 0644 by default) and prints the files, then each plane file it stored for you: its role, its id and the markdown that embeds it. If you stop it with Ctrl-C, the job carries on and the grant stays live until its ttl; it prints the `sc-job fetch … --grant <id>` line to resume (fetch revokes the grant once it has the results) and the call to revoke. SIGTERM or SIGHUP (unless started under `nohup`) revokes the grant, so the job's uploads to the plane will fail, and prints the fetch line. Exit: 0 done; 1 failed/cancelled/expired; 2 usage, HTTP or interrupted.
 
 The service runs the job under its own lease. It posts nothing on the plane for you.
 
@@ -357,6 +357,7 @@ POST /grants {"service_id": "<the service's id>", "group_scope": "<a group you e
 
 - **`group_scope` is a plane group you edit,** one of `GET /groups`. A service's own groups, such as the registry's crew group, are a different thing and won't work here.
 - When the job is `done`, `GET` on the job has the ids of the files it stored for you in `plane_files`. It's an object keyed by what each file is, not a list. scene-render's looks like `{"sheet": 4337, "shots_json": 4338, "shots_md": 4339, "clips": {}, "stills": {"weave-01.jpg": 4340, …}}`. `results`, beside it, holds the service's own paths. The files are in your group, owned by you, with `uploaded_by` naming the service.
+- **The files in `plane_files` are already yours: embed those ids. Don't download them and upload them again.** A copy you upload has no `uploaded_by`, so it no longer shows which service made it.
 - `GET /files/{id}` gives `name`, `bytes`, `content_type`, `owner`, `uploaded_by` and `url`. `markdown` is ready to paste into a comment to embed it.
 - **Make the ttl a little longer than the job,** and revoke the grant once the job is `done`: `DELETE /grants/{id}`. `GET /grants` shows how many files each grant stored.
 - A grant lets that one service upload into that one group until it expires, and nothing else. It's useless to anyone without that service's own token. **Never send your own token in its place.**

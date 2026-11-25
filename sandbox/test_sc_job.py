@@ -110,7 +110,15 @@ class Plane(Base):
             fid = p.rsplit("/", 1)[1]
             if fid == "999":
                 return self.send(404, {"detail": "no such file"})
-            return self.send(200, {"id": int(fid), "content_type": "image/png" if fid == "101" else "application/json"})
+            if fid == "101":
+                return self.send(200, {"id": 101, "name": "sheet.png", "content_type": "image/png",
+                                       "markdown": "![sheet.png](/api/v1/files/101/raw)"})
+            if fid == "102":
+                return self.send(200, {"id": 102, "name": "a-01.jpg", "content_type": "image/jpeg"})
+            if fid == "103":
+                return self.send(200, {"id": 103, "name": "x.png", "content_type": "image/png",
+                                       "markdown": "![x](https://elsewhere.example/x.png)"})
+            return self.send(200, {"id": int(fid), "content_type": "application/json"})
         return self.send(404, {"detail": f"plane has no {method} {p}"})
 
     def do_GET(self):
@@ -141,7 +149,7 @@ def job_doc(job, n):
                 "results": {"sheet": f"/jobs/{job}/files/sheet.png", "note": "plain text, not a file",
                             "cameras": [{"shots": [{"still": f"/jobs/{job}/files/stills/a-01.jpg"}]}],
                             "elsewhere": "/jobs/OTHER/files/x.png"},
-                "plane_files": {"missing": 999, "sheet": 101, "stills": {"a-01.jpg": 102}, "odd": "²"}}
+                "plane_files": {"missing": 999, "sheet": 101, "stills": {"a-01.jpg": 102}, "odd": "²", "lure": 103}}
     if job == "J2":
         return {"job": job, "status": "failed", "error": "boom \x1b]0;pwned\x07here"}
     if job == "J3":
@@ -425,7 +433,16 @@ def main():
     check("the summary names the job, its timings and the files",
           "job J1: done · waited 3 s, render 4 s" in r.stdout and "sheet.png" in r.stdout, r.stdout)
     check("plane files are listed by role", "  sheet 101" in r.stdout and "  stills/a-01.jpg 102" in r.stdout, r.stdout)
-    check("the embed line names the first image, past a 404", "embed: ![](/api/v1/files/101/raw)" in r.stdout, r.stdout)
+    check("the summary says the plane files are already yours, not to re-upload",
+          "already on the plane" in r.stdout and "don't upload the downloads again" in r.stdout, r.stdout)
+    check("each plane file is printed with the plane's markdown",
+          "  sheet 101  ![sheet.png](/api/v1/files/101/raw)" in r.stdout, r.stdout)
+    check("a file with no markdown gets one built from its name and type",
+          "  stills/a-01.jpg 102  ![a-01.jpg](/api/v1/files/102/raw)" in r.stdout, r.stdout)
+    check("a file the plane can't read still gets a link to it",
+          "  missing 999  [missing](/api/v1/files/999/raw)" in r.stdout, r.stdout)
+    check("markdown pointing anywhere but that file is not printed",
+          "elsewhere.example" not in r.stdout and "  lure 103  ![x.png](/api/v1/files/103/raw)" in r.stdout, r.stdout)
     g = minted_since(mark)
     check("the grant rode in the body, top-level", len(g) == 1 and S.bodies.get("J1", {}).get("grant") == f"sc_grant_{g[0]}",
           S.bodies.get("J1"))
