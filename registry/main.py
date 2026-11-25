@@ -122,6 +122,25 @@ def _dns_record(op: str, subdomain: str, domain: str, *, repoint: bool = False,
         return {"success": False, "message": str(e)}
 
 
+def _dns_preflight(subdomain: Optional[str], domain: str, *, admin: bool) -> None:
+    """Refuse a name that points somewhere other than the plane before anything
+    is stored or wired. The DNS step itself never repoints such a name, but by
+    then the service, the route and the Caddy block exist and claim it (#1157,
+    #45 review). The admin's request may repoint; a zone that can't be read is
+    a refusal, not a guess."""
+    if admin or not subdomain or caddy.by_port(domain) or not _dns_module_on():
+        return
+    try:
+        import dns as dns_mod
+        where = dns_mod.name_points_elsewhere(subdomain, domain)
+    except Exception as e:
+        raise HTTPException(503, f"Can't read DNS to check that {subdomain}.{domain} is free ({e}); "
+                                 "nothing was registered. Try again.")
+    if where:
+        raise HTTPException(409, f"{subdomain}.{domain} already points at {where}, not this plane; "
+                                 "only the admin repoints a name")
+
+
 def _external_url(subdomain: str, domain: Optional[str] = None) -> str:
     """Build external URL for a service, respecting the environment's HTTPS port.
 
@@ -2614,6 +2633,7 @@ def register_service(req: ServiceRegister, auth: AuthContext = Depends(get_auth)
             (req.subdomain, req.domain))
         if existing_route:
             raise HTTPException(409, f"Subdomain {req.subdomain}.{req.domain} already claimed by {existing_route['service_id']}")
+        _dns_preflight(req.subdomain, req.domain, admin=auth.is_admin())
 
     service_id = f"{req.device_id}/{req.name}"
     existing = db.query_one("SELECT id FROM services WHERE id = ?", (service_id,))
@@ -2855,6 +2875,7 @@ def activate_route(subdomain: str, domain: Optional[str] = None, auth: AuthConte
         _require_service_manager(auth, route["service_id"])
     elif not auth.is_admin():
         raise HTTPException(403, "Only an administrator can activate a route with no service")
+    _dns_preflight(subdomain, domain, admin=auth.is_admin())
 
     result = {}
 
@@ -7163,6 +7184,7 @@ def register_service_authenticated(
             (req.subdomain, req.domain))
         if claimed:
             raise HTTPException(409, f"Subdomain {req.subdomain}.{req.domain} already claimed by {claimed['service_id']}")
+        _dns_preflight(req.subdomain, req.domain, admin=False)
 
     # Auto-allocate a host forward port for a device reached by reverse tunnel,
     # keyed on the tunnel itself, as in the slot path above (it used to key on

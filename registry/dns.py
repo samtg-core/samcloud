@@ -153,6 +153,25 @@ def _has_record(records: list[dict], subdomain: str, record_type: str, address: 
     )
 
 
+_ELSEWHERE_TYPES = ("CNAME", "AAAA", "ALIAS", "URL", "URL301", "FRAME")
+
+
+def _elsewhere(records: list[dict], subdomain: str, address: str, record_type: str = "A") -> list[dict]:
+    """The records of this name that point somewhere other than address."""
+    return [rec for rec in records
+            if rec["name"].lower() == subdomain.lower()
+            and (rec["type"] in _ELSEWHERE_TYPES
+                 or (rec["type"] == record_type and rec["address"] != address))]
+
+
+def name_points_elsewhere(subdomain: str, domain: str) -> str | None:
+    """What this name points at, when that isn't the plane; None when it's free
+    or already the plane's. Raises when the zone can't be read: the caller
+    decides, and registration refuses rather than guess (#45 review)."""
+    other = _elsewhere(get_records(domain), subdomain, _get_public_ip())
+    return ", ".join(f'{rec["type"]} {rec["address"]}' for rec in other) or None
+
+
 def add_record(subdomain: str, domain: str, record_type: str = "A",
                address: str = None, ttl: str = "1800", repoint: bool = False) -> tuple[bool, str]:
     """Add a DNS record, preserving all existing records.
@@ -175,10 +194,7 @@ def add_record(subdomain: str, domain: str, record_type: str = "A",
             return False, f"Failed to get existing records: {e}"
 
         if not repoint:
-            other = [rec for rec in existing
-                     if rec["name"].lower() == subdomain.lower()
-                     and (rec["type"] in ("CNAME", "AAAA", "ALIAS", "URL", "URL301", "FRAME")
-                          or (rec["type"] == record_type and rec["address"] != address))]
+            other = _elsewhere(existing, subdomain, address, record_type)
             if other:
                 where = ", ".join(f'{rec["type"]} {rec["address"]}' for rec in other)
                 audit("system:dns", "record.refused", f"{subdomain}.{domain}",
@@ -237,13 +253,26 @@ def add_record(subdomain: str, domain: str, record_type: str = "A",
     return False, f"Failed to add {subdomain}.{domain} after {_MAX_RETRIES} attempts: {last_err}"
 
 
-def remove_record(subdomain: str, domain: str, record_type: str = "A") -> tuple[bool, str]:
-    """Remove a DNS record, preserving all other records.
+def remove_record(subdomain: str, domain: str, record_type: str = "A",
+                  address: str = None) -> tuple[bool, str]:
+    """Remove this plane's DNS record for a name, preserving all other records.
+
+    Only a record pointing at the plane (address, default the public IP the add
+    would have written) is removed. A record of the name that points elsewhere
+    is another host's, and stays: deleting a service must not take down a name
+    the plane never served (#1157, #45 review).
 
     Verifies the record is absent after writing; retries on clobber-revival
     (where a concurrent writer's stale snapshot brought our removed record
     back). Returns (success, message).
     """
+    if address is None:
+        address = _get_public_ip()
+
+    def ours(r):
+        return (r["name"].lower() == subdomain.lower() and r["type"] == record_type
+                and r["address"] == address)
+
     last_err = None
     for attempt in range(1, _MAX_RETRIES + 1):
         try:
@@ -251,10 +280,14 @@ def remove_record(subdomain: str, domain: str, record_type: str = "A") -> tuple[
         except Exception as e:
             return False, f"Failed to get existing records: {e}"
 
-        filtered = [r for r in existing
-                    if not (r["name"] == subdomain and r["type"] == record_type)]
+        filtered = [r for r in existing if not ours(r)]
 
         if len(filtered) == len(existing):
+            other = _elsewhere(existing, subdomain, address, record_type)
+            if other:
+                where = ", ".join(f'{rec["type"]} {rec["address"]}' for rec in other)
+                audit("system:dns", "record.kept", f"{subdomain}.{domain}", {"existing": where})
+                return True, f"{subdomain}.{domain} points at {where}, not at this plane; left alone"
             return True, f"{subdomain}.{domain} not found (already removed)"
 
         try:
@@ -273,9 +306,7 @@ def remove_record(subdomain: str, domain: str, record_type: str = "A") -> tuple[
                 time.sleep(_RETRY_DELAY_S)
             continue
 
-        still_present = any(
-            r["name"] == subdomain and r["type"] == record_type for r in current
-        )
+        still_present = any(ours(r) for r in current)
         if not still_present:
             audit("system:dns", "record.removed", f"{subdomain}.{domain}",
                   {"type": record_type, "remaining_records": len(current),
