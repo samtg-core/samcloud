@@ -626,6 +626,22 @@ def main():
     check("a second SIGTERM during the revoke is ignored: the revoke finishes and the hint is printed",
           p.returncode == 2 and g and g[0] in S.revoked and "resume:  sc-job fetch dev/render J8" in e, (p.returncode, g, e))
     mark = S.next_grant
+    for first, second in ((signal.SIGINT, signal.SIGTERM), (signal.SIGTERM, signal.SIGINT)):
+        for trial in range(2):
+            mark = S.next_grant
+            before = S.polls.get("J8", 0)
+            p = subprocess.Popen([sys.executable, str(HELPER), "call", "dev/render", "/render", '{"scenario":"slow"}',
+                                  "--store", "projects", "--out", "o-both"], cwd=tmp, env=env_for(tmp),
+                                 stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+            wait_polls(before)
+            p.send_signal(first)
+            p.send_signal(second)
+            o, e = p.communicate(timeout=30)
+            g = minted_since(mark)
+            check(f"{first.name} and {second.name} together (try {trial + 1}): the stop wins, so the grant is "
+                  "revoked and the fetch line printed (exit 2)",
+                  p.returncode == 2 and g and g[0] in S.revoked and "stopped by SIGTERM" in e
+                  and "resume:  sc-job fetch dev/render J8" in e and "Traceback" not in e, (p.returncode, g, e[-400:]))
     mark = S.next_grant
     p, o, e = interrupted(["call", "dev/render", "/render", '{"scenario":"slow"}', "--store", "slowrevoke", "--out", "o-tint"],
                           tmp, signal.SIGTERM, then=(0.4, signal.SIGINT))

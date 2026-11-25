@@ -37,8 +37,9 @@ job ends. --ttl is the grant's life (default 7200 s). With --no-wait, or if you
 stop waiting with Ctrl-C, the job carries on and the grant stays live until its
 ttl so the uploads still land; sc-job prints the `sc-job fetch … --grant ID`
 line that resumes, downloads and then revokes it. SIGTERM or SIGHUP revokes the
-grant (the job's uploads will then fail) and prints the fetch line. If a revoke
-fails it says so, prints the command, and carries on.
+grant (the job's uploads will then fail) and prints the fetch line; so does a
+Ctrl-C that comes with one, in either order. If a revoke fails it says so,
+prints the command, and carries on.
 
 What a service has to answer (tools.md, "Register a service"): the submit reply
 names `job` (and may name `poll`, else /jobs/<job>); the poll answers `status`,
@@ -592,13 +593,23 @@ def kept_note(c, a, job, poll, grant, why):
         note(f"  or revoke it now:  {c.revoke_hint(grant['id'])}")
 
 
-def stopped_note(c, a, job, poll, grant, e):
+def stopped_note(c, a, job, poll, grant, signame):
     """SIGTERM or SIGHUP while waiting: the grant is revoked (signals ignored meanwhile), then the hint."""
-    note(f"\n{PROG}: stopped by {e.signame}. Job {job} carries on at the service.")
+    note(f"\n{PROG}: stopped by {signame}. Job {job} carries on at the service.")
     if grant:
         note(f"  revoking grant {clean(grant['id'], 40)}: the job's uploads to the plane will fail.")
         revoke(c, grant)
     note(f"  resume:  {fetch_hint(a, job, poll)}")
+
+
+def interrupted_note(c, a, job, poll, grant):
+    """Ctrl-C while waiting keeps the grant: someone chose to leave the job running. A SIGTERM or
+    SIGHUP with it (a closing terminal, a supervisor, timeout) means sc-job is being shut down,
+    perhaps with no one to read the hint: that wins, and the grant is revoked as for SIGTERM alone."""
+    if not _SIGNALS["stop"]:
+        kept_note(c, a, job, poll, grant, "stopped waiting")
+    if _SIGNALS["stop"]:                    # it came before the note, or during it
+        stopped_note(c, a, job, poll, grant, _SIGNALS["stop"])
 
 
 def cmd_call(c, a):
@@ -629,8 +640,8 @@ def cmd_call(c, a):
         try:
             j = wait(c, base, poll, job)
         except KeyboardInterrupt:
-            keep = True
-            kept_note(c, a, job, poll, grant, "stopped waiting")
+            keep = True                    # interrupted_note revokes it if a SIGTERM came too
+            interrupted_note(c, a, job, poll, grant)
             return 2
         except PollLost as e:
             keep = True
@@ -638,7 +649,7 @@ def cmd_call(c, a):
             return 2
         except Stopped as e:
             keep = True                    # stopped_note revokes it, with signals ignored
-            stopped_note(c, a, job, poll, grant, e)
+            stopped_note(c, a, job, poll, grant, e.signame)
             raise
     finally:
         if grant and not keep:
@@ -657,7 +668,7 @@ def cmd_fetch(c, a):
             j = wait(c, base, poll, job)
         except KeyboardInterrupt:
             keep = True
-            kept_note(c, a, job, poll, grant, "stopped waiting")
+            interrupted_note(c, a, job, poll, grant)
             return 2
         except PollLost as e:
             keep = True
@@ -665,7 +676,7 @@ def cmd_fetch(c, a):
             return 2
         except Stopped as e:
             keep = True
-            stopped_note(c, a, job, poll, grant, e)
+            stopped_note(c, a, job, poll, grant, e.signame)
             raise
         return finish(c, a, base, poll, job, j)
     finally:
@@ -684,15 +695,33 @@ def cmd_list(c, a):
     return 0
 
 
+# The first signal starts the way out and later ones are ignored, so a second one can't cut its
+# note or its revoke short. A stop after a Ctrl-C is remembered: interrupted_note revokes for it.
+_SIGNALS = {"first": None, "stop": None}
+
+
 def _stop(signum, _frame):
-    raise Stopped(signal.Signals(signum).name)
+    name = signal.Signals(signum).name
+    if _SIGNALS["first"] is None:
+        _SIGNALS["first"] = _SIGNALS["stop"] = name
+        raise Stopped(name)
+    if _SIGNALS["first"] == "SIGINT" and not _SIGNALS["stop"]:
+        _SIGNALS["stop"] = name
+
+
+def _interrupt(_signum, _frame):
+    if _SIGNALS["first"] is None:
+        _SIGNALS["first"] = "SIGINT"
+        raise KeyboardInterrupt
 
 
 def install_signals():
     signal.signal(signal.SIGTERM, _stop)
-    # Under nohup SIGHUP is ignored on purpose: leave it that way.
+    # Under nohup SIGHUP is ignored on purpose, and SIGINT under `&`: leave them that way.
     if hasattr(signal, "SIGHUP") and signal.getsignal(signal.SIGHUP) != signal.SIG_IGN:
         signal.signal(signal.SIGHUP, _stop)
+    if signal.getsignal(signal.SIGINT) is signal.default_int_handler:
+        signal.signal(signal.SIGINT, _interrupt)
 
 
 def main():
