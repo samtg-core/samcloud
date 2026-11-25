@@ -2311,13 +2311,39 @@ def clear_device_host_key(device_id: str, auth: AuthContext = Depends(get_auth))
 
 # --- Services ---
 
+# An `online` service whose last health report is older than this reads as `stale`
+# (task 1472: wafer/imagegen last reported 3 Nov, nerfstudio-api 31 Jul, and both
+# still read `online`). The service guide always said "your status will go stale".
+SERVICE_STALE_AFTER_S = int(os.environ.get("SERVICE_STALE_AFTER_S", "1800"))
+
+
+def _health_age_s(last_health) -> Optional[int]:
+    """Seconds since `last_health` (ISO, with or without an offset; naive is UTC), or None."""
+    if not last_health:
+        return None
+    try:
+        at = datetime.fromisoformat(str(last_health).replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    if at.tzinfo is None:
+        at = at.replace(tzinfo=timezone.utc)
+    return max(0, int((datetime.now(timezone.utc) - at).total_seconds()))
+
+
 def _deserialize_service(svc: dict) -> dict:
-    """Parse JSON text fields (capabilities) into native types."""
+    """Parse JSON text fields (capabilities) into native types, and age health out:
+    an `online` entry with no report for SERVICE_STALE_AFTER_S reads `stale`.
+    Computed on read; the stored status is unchanged, so the next report clears it."""
     if svc and isinstance(svc.get("capabilities"), str):
         try:
             svc["capabilities"] = json.loads(svc["capabilities"])
         except (json.JSONDecodeError, TypeError):
             pass
+    if svc:
+        age = _health_age_s(svc.get("last_health"))
+        svc["health_age_s"] = age
+        if svc.get("status") == "online" and age is not None and age > SERVICE_STALE_AFTER_S:
+            svc["status"] = "stale"
     return svc
 
 
@@ -2328,9 +2354,6 @@ def list_services(device_id: str = None, status: str = None,
     if device_id:
         clauses.append("device_id = ?")
         params.append(device_id)
-    if status:
-        clauses.append("status = ?")
-        params.append(status)
 
     where = " WHERE " + " AND ".join(clauses) if clauses else ""
     rows = db.query(f"SELECT * FROM services{where} ORDER BY device_id, name", tuple(params))
@@ -2339,7 +2362,9 @@ def list_services(device_id: str = None, status: str = None,
         visible = _visible_device_ids(auth)
         if visible is not None:
             rows = [r for r in rows if r["device_id"] in visible]
-    return [_deserialize_service(r) for r in rows]
+    out = [_deserialize_service(r) for r in rows]
+    # ?status= filters on the status as read, so ?status=online leaves out the stale.
+    return [r for r in out if r["status"] == status] if status else out
 
 
 @app.get("/api/v1/services/{service_id:path}/guide")
@@ -2414,7 +2439,7 @@ curl -s -X POST "{public_url}/api/v1/services/{service_id}/health" \\
   -H @"$HOME/.samcloud/service.hdr"
 ```
 
-If you stop reporting, your status will go stale. Other services and agents can see when you last reported.
+If you stop reporting for 30 minutes, `GET /services` shows your status as `stale` instead of `online`, and `health_age_s` says how long it has been. The next report makes it `online` again.
 
 ## Updating Your Metadata
 

@@ -2,6 +2,11 @@
 
 What each release changed.
 
+## 2026-11-26 — A service that stops reporting health reads `stale`
+
+- `GET /services` and `GET /services/{id}`: an `online` entry whose last health report is more than 30 minutes old (`SERVICE_STALE_AFTER_S`, 1800) reads `stale`, and every entry carries `health_age_s`. It's computed on read, so the stored status is unchanged and the next report makes it `online` again. `?status=` filters on the status as read. Only `online` ages out: `maintenance`, `stopped` and the rest stay as set. The service guide always said "your status will go stale". Until now `wafer/imagegen` (last report 3 Nov) and `wafer-services/nerfstudio-api` (31 Jul) still read `online` (task 1472).
+- Test: `registry/test_service_stale.py` (7 cases).
+
 ## 2026-11-26 — The dashboard links a repo's PR to GitHub
 
 - A pull request written with its repo links to GitHub: `unity-service#16`, `unity-service #16`, `unity-service PR 16` and `owner/repo#16`. "unity-service #16" used to link to ticket 16 (#1144). A plain `#N`, and `samcloud #N` with a space, still link to the plane's ticket. The short names are in `REPO_OWNER` in `console/src/lib/refLinks.ts`; any other repo is written `owner/repo#N`.
