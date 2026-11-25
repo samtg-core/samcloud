@@ -12,6 +12,7 @@ What each release changed.
   - A status sc-job doesn't know (a `processing` whose `stage` moves) is waited out for as long as the answer changes: its status, stage, progress or position. The wait stops (exit 2, grant kept, fetch line printed) after 20 polls in a row with no status, or with the same unfamiliar answer. It used to stop at 20 polls however the job moved, in `fetch` too, so such a job could never be waited out. tools.md says so (still 3.24.1, which isn't released yet).
   - A chunked download that also carries a Content-Length no longer fails as short. The check now reads what http.client tracks (`length`, which chunking leaves unset) rather than the header.
   - SIGINT and SIGTERM together (in either order) used to exit 2 silently, leaving the grant live with no resume line. Now the first signal starts the way out and later ones are ignored, so nothing cuts a note or a revoke short. A SIGTERM or SIGHUP that comes with a Ctrl-C wins: the grant is revoked and the fetch line printed, as for SIGTERM alone. A lone Ctrl-C is someone choosing to leave the job running; a stop signal means sc-job is being shut down, perhaps with no one to read the hint, and a live grant with no owner is the worse failure. SIGINT already ignored (`&` in a non-interactive shell) is left ignored.
+  - Not changed: a download served with `Content-Encoding: gzip` is saved as sent, compressed. sc-job sends no `Accept-Encoding`, so only a service that ignores that would do it.
 
 ## 2026-11-25 — sc-job: call any service in one command
 
