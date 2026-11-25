@@ -12,6 +12,7 @@ import importlib.machinery
 import importlib.util
 import json
 import os
+import re
 import signal
 import socket
 import subprocess
@@ -133,7 +134,8 @@ class Plane(Base):
 
 SCENARIOS = {"ok": "J1", "fail": "J2", "escape": "J3", "redirect": "J4", "cancel": "J5", "link": "J6",
              "blips": "J7", "slow": "J8", "odd": "J9", "canceled": "J10", "flaky": "J11", "apiredir": "J13",
-             "rate": "J14", "truncated": "J15", "lost404": "J16", "lost": "J17", "nostatus": "J18", "unicode": "J19"}
+             "rate": "J14", "truncated": "J15", "lost404": "J16", "lost": "J17", "nostatus": "J18", "unicode": "J19",
+             "echo": "J20"}
 REPLIES = {"badjob": {"job": "x/evil1"}, "badpoll": {"job": "J12", "poll": "/jobs/../evilpoll"}}
 FILES = {"/jobs/J1/files/sheet.png": b"PNGDATA", "/jobs/J1/files/stills/a-01.jpg": b"JPGDATA",
          "/jobs/J6/files/link/x.txt": b"LINKED", "/jobs/J7/files/out.txt": b"AFTERBLIPS",
@@ -176,6 +178,8 @@ def job_doc(job, n):
         return {"job": job, "status": "done", "results": []}
     if job == "J18":
         return {"job": job}
+    if job == "J20":                              # echoes the request it was given, grant and all
+        return {"job": job, "status": "done", "results": [], "request": S.bodies.get(job)}
     if job == "J19":
         return {"job": job, "status": "done",
                 "results": [f"/jobs/{job}/files/my%20sheet%20%C3%A9.png", f"/jobs/{job}/files/stills/café 01.jpg"]}
@@ -190,6 +194,9 @@ class Service(Base):
         scenario = (body or {}).get("scenario")
         with S.lock:
             S.posts[scenario] = S.posts.get(scenario, 0) + 1
+        if scenario == "strict422":              # a model that forbids extra fields echoes the grant
+            return self.send(422, {"detail": [{"type": "extra_forbidden", "loc": ["body", "grant"],
+                                               "msg": "Extra inputs are not permitted", "input": body.get("grant")}]})
         if scenario == "submit500":
             return self.send(500, {"error": "can't take it"})
         if scenario == "dropsubmit":             # took the body, then the line went dead
@@ -585,6 +592,22 @@ def main():
           r.returncode == 1 and r.stderr.count("doesn't know") == 1 and "job J9: expired" in r.stdout, r.stdout + r.stderr)
     r = run(["call", "dev/render", "/render", '{"scenario":"canceled"}'], tmp)
     check("'canceled' ends the wait, exit 1", r.returncode == 1 and "job J10: canceled" in r.stdout, r.stdout + r.stderr)
+
+    print("sc-job — a grant is never printed")
+    secret = re.compile(r"sc_grant_\d")
+    mark = S.next_grant
+    r = run(["call", "dev/render", "/render", '{"scenario":"strict422"}', "--store", "projects"], tmp)
+    g = minted_since(mark)
+    check("a 422 that echoes the grant prints it redacted, and the grant is revoked (exit 2)",
+          r.returncode == 2 and not secret.search(r.stdout + r.stderr) and "sc_grant_[redacted]" in r.stderr
+          and g and g[0] in S.revoked, (r.returncode, g, r.stderr))
+    r = run(["call", "dev/render", "/render", '{"scenario":"echo"}', "--store", "projects", "--json", "--out", "o-echo"], tmp)
+    check("--json of a job that echoes the request prints the grant redacted",
+          r.returncode == 0 and not secret.search(r.stdout + r.stderr)
+          and json.loads(r.stdout)["request"]["grant"] == "sc_grant_[redacted]", (r.returncode, r.stdout, r.stderr))
+    r = run(["status", "dev/render", "J20"], tmp)
+    check("status of that job prints the grant redacted",
+          r.returncode == 0 and not secret.search(r.stdout) and "sc_grant_[redacted]" in r.stdout, r.stdout)
 
     print("sc-job — refusals")
     r = run(["call", "dev/render", "/render", '{"scenario":"escape"}', "--out", "j3"], tmp)

@@ -51,7 +51,8 @@ Where it calls (as sc-say): --plane NAME (a plane the serving plane names) > $SA
 Auth — a 0600 header file, never the bearer on a command line (#582):
   --hdr FILE (must exist) > $SAMCLOUD_AUTH_HDR > ~/.samcloud/token.hdr
 The bearer goes only to the plane and to the service's own https address, and is
-never printed. API calls follow a redirect only to the same origin. A download
+never printed. Nor is a grant: any sc_grant_… in what sc-job prints (a service's
+error that echoes the request, --json, status) shows as sc_grant_[redacted]. API calls follow a redirect only to the same origin. A download
 may follow an https redirect to another host, without the bearer; a redirect to
 plain http is refused. Python 3 standard library only.
 """
@@ -87,6 +88,7 @@ JOB_ID = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,127}")
 LOOPBACK = ("localhost", "127.0.0.1", "::1")
 ANSI = re.compile(r"\x1b\[[0-?]*[ -/]*[@-~]|\x1b\][^\x07\x1b]*(\x07|\x1b\\)?")
 CONTROL = re.compile(r"[\x00-\x1f\x7f-\x9f]")
+GRANT_SECRET = re.compile(r"sc_grant_[A-Za-z0-9_-]+")     # the plane mints sc_grant_ + token_urlsafe
 
 
 def _pair(name, default):
@@ -123,6 +125,20 @@ class Stopped(SystemExit):
     def __init__(self, signame):
         super().__init__(2)
         self.signame = signame
+
+
+class Redacted:
+    """A text stream that never shows a grant secret. Services echo requests in errors and job
+    records, and agents post terminal output on the plane."""
+
+    def __init__(self, stream):
+        self._stream = stream
+
+    def write(self, text):
+        return self._stream.write(GRANT_SECRET.sub("sc_grant_[redacted]", text))
+
+    def __getattr__(self, name):
+        return getattr(self._stream, name)
 
 
 def clean(value, limit=300):
@@ -724,6 +740,7 @@ def main():
 
 
 def run():
+    sys.stdout, sys.stderr = Redacted(sys.stdout), Redacted(sys.stderr)
     try:
         sys.exit(main())
     except CallError as e:
