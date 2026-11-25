@@ -7837,3 +7837,83 @@ class TestAccessKeyPairLink:
         assert r.status_code == 200, r.text
         assert r.json()["pair_link_url"].endswith("/api/v1/access-keys/pair")
         assert any("/api/v1/access-keys/pair" in s for s in r.json()["next_steps"])
+
+
+# ===========================================================================
+# Service domain: callers send their bearer to external_url (#1157)
+# ===========================================================================
+
+class TestServiceDomain:
+    def test_a_device_manager_publishes_only_under_the_planes_domain(self, client, tmp_db):
+        """external_url is built from the domain, and callers send their token
+        there. A device manager can't point it at a host the plane doesn't run."""
+        app = _get_app()
+        _register_device(client, "dom-host", "dom-host")
+        with TestClient(app) as raw:
+            token, _ = _invite_and_activate(client, raw, "dom-agent", ["device:dom-host"])
+            mgr = AuthedClient(raw, token)
+            r = mgr.post("/api/v1/services", json={
+                "name": "elsewhere", "device_id": "dom-host", "port": 8101, "description": "t",
+                "subdomain": "elsewhere", "domain": "attacker.example"})
+            assert r.status_code == 403, r.text
+            assert "admin" in r.json()["detail"]
+            r = mgr.post("/api/v1/services", json={
+                "name": "here", "device_id": "dom-host", "port": 8102, "description": "t"})
+            assert r.status_code in (200, 201), r.text
+            r = mgr.post("/api/v1/routes", json={
+                "subdomain": "here-elsewhere", "domain": "attacker.example",
+                "target": "localhost:8102", "service_id": "dom-host/here"})
+            assert r.status_code == 403, r.text
+
+    def test_a_device_token_registers_only_under_the_planes_domain(self, client):
+        import enrollment
+        with patch.object(port_alloc, "_port_in_use", return_value=False):
+            _register_device(client, "tok-host", "tok-host")
+            tok = enrollment.generate_device_token("tok-host")
+            h = {"Authorization": f"Bearer {tok}"}
+            r = client.post("/api/v1/services/register", headers=h, json={
+                "name": "away", "port": 9101, "subdomain": "away-tok", "domain": "attacker.example"})
+            assert r.status_code == 403, r.text
+            r = client.post("/api/v1/services/register", headers=h, json={"name": "home", "port": 9102})
+            assert r.status_code == 200, r.text
+
+    def test_a_case_variant_is_stored_canonical_and_cannot_take_a_claimed_name(self, client, tmp_db, monkeypatch):
+        """Caddy lowercases hosts, so SAMTG.xyz is the live site. A variant must
+        neither pass the claim check nor be stored as sent (#44 review)."""
+        import main
+        # About domains, not DNS: the module would otherwise switch on from the
+        # runner's own ~/.config/samcloud/namecheap.env and reach the real zone.
+        monkeypatch.setattr(main, "_dns_module_on", lambda: False)
+        app = _get_app()
+        plane = main._service_domain().lower()
+        _register_device(client, "real-host", "real-host")
+        _register_device(client, "var-host", "var-host")
+        assert _register_service(client, "models", "real-host", 8800,
+                                 subdomain="models-cs").status_code in (200, 201)
+        with TestClient(app) as raw:
+            token, _ = _invite_and_activate(client, raw, "var-agent", ["device:var-host"])
+            mgr = AuthedClient(raw, token)
+            for variant in (plane.upper(), plane + ".", " " + plane):
+                r = mgr.post("/api/v1/services", json={
+                    "name": "shadow", "device_id": "var-host", "port": 8801, "description": "t",
+                    "subdomain": "models-cs", "domain": variant})
+                assert r.status_code == 409, (variant, r.text)
+            r = mgr.post("/api/v1/services", json={
+                "name": "own", "device_id": "var-host", "port": 8802, "description": "t",
+                "subdomain": "own-var", "domain": plane.upper() + "."})
+            assert r.status_code in (200, 201), r.text
+            assert r.json()["external_url"].split("//")[1].startswith("own-var." + plane)
+        assert db.query_one("SELECT domain FROM services WHERE id = 'var-host/own'")["domain"] == plane
+        assert db.query_one("SELECT domain FROM routes WHERE subdomain = 'own-var'")["domain"] == plane
+
+    def test_the_domain_is_canonical_and_only_the_admin_may_name_another(self, monkeypatch):
+        import main
+        from fastapi import HTTPException
+        monkeypatch.setenv("SAMCLOUD_DOMAIN", "samtg.xyz")
+        for same in ("samtg.xyz", "SAMTG.xyz.", " samtg.xyz", "", None):
+            assert main._canonical_service_domain(same, admin=False) == "samtg.xyz"
+        for other in ("attacker.example", "samtg.xyz.attacker.example", "xsamtg.xyz"):
+            with pytest.raises(HTTPException) as e:
+                main._canonical_service_domain(other, admin=False)
+            assert e.value.status_code == 403
+        assert main._canonical_service_domain(" Attacker.Example. ", admin=True) == "attacker.example"

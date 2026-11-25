@@ -18,7 +18,7 @@ A route or service is published under the **service domain** when its request na
 | nothing, `PUBLIC_URL=https://cloud.example.org` | `PUBLIC_URL`'s host itself | `https://app.cloud.example.org` |
 | nothing, `PUBLIC_URL=http://192.0.2.10:7778` | an IP address, which can't carry subdomains | `http://192.0.2.10:18101`, its own port from the route range, plain HTTP |
 
-No parent domain is guessed, because which part of a name an instance controls can't be read from the name. An instance that publishes under a parent, such as a plane at `cloud.example.org` publishing under `example.org`, sets `SAMCLOUD_DOMAIN`. A request can still name another domain in its `domain` field.
+No parent domain is guessed, because which part of a name an instance controls can't be read from the name. An instance that publishes under a parent, such as a plane at `cloud.example.org` publishing under `example.org`, sets `SAMCLOUD_DOMAIN`. Only the admin can name another domain in a request's `domain` field; anyone else gets `403`, because callers send their token to the `external_url` built from it.
 
 Devices dial their tunnel at `PLANE_HOST`, which falls back to `PUBLIC_URL`'s host. [Configuration](Configuration.md#the-plane) lists all three settings.
 

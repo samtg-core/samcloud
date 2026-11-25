@@ -174,7 +174,7 @@ A route is a subdomain under a domain, pointing at a target. Which domain, and h
 | no `SAMCLOUD_DOMAIN`, `PUBLIC_URL` on an IP address | `http://192.0.2.10:18101`: its own port from the route range (default 18101–18110) | none needed | none: plain HTTP |
 
 - **The HTTPS port** in an external URL is `PUBLIC_HTTPS_PORT`, which compose sets from `SSLH_PORT`. It is left out when it is 443.
-- **A request may name its own `domain`.** With none, the plane's domain is used.
+- **Services are published under the plane's domain.** A request that names another `domain` is refused with `403`, unless it comes from the admin: callers send their token to a service's `external_url`, so it has to be a host the plane runs.
 - **A TLS snippet.** If the Caddyfile defines a snippet named `(<name>-tls)`, each route imports it, for example for DNS-01 certificates. See [DNS and TLS](DNS%20and%20TLS.md).
 - **Routes by hand.** `GET /routes` lists the routes for services in your scope (the admin: all). `POST /routes` records a route for a service on a device you manage; a route with no service is the admin's. Recording a route does not wire it: activate it.
 

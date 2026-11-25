@@ -2563,6 +2563,26 @@ def delete_service(service_id: str, auth: AuthContext = Depends(get_auth)):
             "route": {"caddy": caddy_status, "dns": dns_status}}
 
 
+def _canonical_service_domain(domain: Optional[str], *, admin: bool) -> str:
+    """The domain a service or route is stored and published under.
+
+    Callers send their bearer to a service's external_url (sc-job, the skill's
+    curl recipe), and external_url is built from this domain. A device manager
+    naming another domain would point every caller's token at a host the plane
+    doesn't control, so anyone but the admin gets the plane's own (#1157, #43
+    review). The value is canonical (trimmed, lowercased, no trailing dot)
+    because that is what gets stored: Caddy lowercases hosts, and a case
+    variant would slip past the exact-match claim check into the live site
+    (#44 review).
+    """
+    plane = _service_domain().strip().rstrip(".").lower()
+    d = (domain or "").strip().rstrip(".").lower() or plane
+    if d != plane and not admin:
+        raise HTTPException(403, f"Services are routed under {plane}; "
+                                 "another domain is the admin's to set")
+    return d
+
+
 @app.post("/api/v1/services")
 def register_service(req: ServiceRegister, auth: AuthContext = Depends(get_auth)):
     """Register a service. Requires admin or device scope."""
@@ -2577,11 +2597,12 @@ def register_service(req: ServiceRegister, auth: AuthContext = Depends(get_auth)
 
     # The device must exist, be visible, and be the caller's to manage
     device = _require_managed_device(auth, req.device_id)
+    req.domain = _canonical_service_domain(req.domain, admin=auth.is_admin())
 
     # Check subdomain uniqueness
     if req.subdomain:
         existing_route = db.query_one(
-            "SELECT service_id FROM routes WHERE subdomain = ? AND domain = ?",
+            "SELECT service_id FROM routes WHERE subdomain = ? AND lower(domain) = lower(?)",
             (req.subdomain, req.domain))
         if existing_route:
             raise HTTPException(409, f"Subdomain {req.subdomain}.{req.domain} already claimed by {existing_route['service_id']}")
@@ -2794,8 +2815,9 @@ def create_route(req: RouteCreate, auth: AuthContext = Depends(get_auth)):
             raise HTTPException(403, f"You can read {req.service_id} but not manage its device")
     elif not auth.is_admin():
         raise HTTPException(403, "A route with no service is the admin's to create")
+    req.domain = _canonical_service_domain(req.domain, admin=auth.is_admin())
     existing = db.query_one(
-        "SELECT * FROM routes WHERE subdomain = ? AND domain = ?",
+        "SELECT * FROM routes WHERE subdomain = ? AND lower(domain) = lower(?)",
         (req.subdomain, req.domain),
     )
     if existing:
@@ -2814,7 +2836,7 @@ def activate_route(subdomain: str, domain: Optional[str] = None, auth: AuthConte
     """Activate a route: set up port forward + Caddy route + DNS. Requires admin or service scope."""
     domain = domain or _service_domain()
     route = db.query_one(
-        "SELECT * FROM routes WHERE subdomain = ? AND domain = ?",
+        "SELECT * FROM routes WHERE subdomain = ? AND lower(domain) = lower(?)",
         (subdomain, domain),
     )
     if not route:
@@ -7109,6 +7131,7 @@ def register_service_authenticated(
     scopes = json.loads(token_record.get("scopes") or "[]")
     if "service:register" not in scopes and "*" not in scopes:
         raise HTTPException(403, "Token does not have service:register scope")
+    req.domain = _canonical_service_domain(req.domain, admin=False)
 
     # Verify device exists
     device = db.query_one("SELECT * FROM devices WHERE id = ?", (device_id,))
