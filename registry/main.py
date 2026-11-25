@@ -9645,7 +9645,7 @@ def api_index():
             },
             "resources": {
                 "list": {"method": "GET", "path": "/api/v1/resources", "description": "List resources (filter by device, type, provider, available, min_memory_mb)"},
-                "dashboard": {"method": "GET", "path": "/api/v1/resources/dashboard", "description": "Normalised at-a-glance (health colours, utilisation bars)"},
+                "dashboard": {"method": "GET", "path": "/api/v1/resources/dashboard", "description": "Normalised at-a-glance (health colours, utilisation bars). On a hold resource: unsettled, unsettled_memory_mb, and amber health with health_reason while an unsettled expired lease has waiters behind it"},
                 "get": {"method": "GET", "path": "/api/v1/resources/{id}", "description": "Full detail + active and queued leases, the queue in grant order, expiry_policy, and unsettled: expired holders a hold resource still charges until their holder or an admin settles them"},
                 "register": {"method": "POST", "path": "/api/v1/resources", "auth": "scoped"},
                 "stats": {"method": "POST", "path": "/api/v1/resources/{id}/stats", "auth": "scoped", "description": "Push live utilisation (15s recommended). Needs to MANAGE the resource's device: 404 when the device is outside your scope, 403 when you can read it but not manage it"},
@@ -12280,6 +12280,7 @@ def resources_dashboard(auth: Optional[AuthContext] = Depends(get_auth_optional)
         specs = r.get("specs") or {}
         util = r.get("utilisation") or {}
         norm = r.get("normalised", {})
+        available = _get_available_memory(r)   # reaps first, so the counts below see expired holders
 
         # Count active leases, and the waiters queued behind them (0.12.98)
         lease_count = db.query_one(
@@ -12290,6 +12291,24 @@ def resources_dashboard(auth: Optional[AuthContext] = Depends(get_auth_optional)
             "SELECT COUNT(*) as n FROM leases WHERE resource_id = ? AND status = 'queued'",
             (r["id"],),
         )
+
+        # On a `hold` resource an expired holder nobody has settled still charges the
+        # ledger. With a queue behind it the GPU reads idle while nothing is granted,
+        # so the dot turns amber and says why (#1170).
+        unsettled = {"n": 0, "mb": 0}
+        if (r.get("expiry_policy") or "free") == "hold":
+            unsettled = db.query_one(
+                "SELECT COUNT(*) as n, COALESCE(SUM(memory_mb), 0) as mb FROM leases "
+                f"WHERE resource_id = ? AND {LEASE_UNSETTLED}",
+                (r["id"],),
+            ) or unsettled
+        queued = queued_count["n"] if queued_count else 0
+        health, health_reason = norm.get("health", "grey"), None
+        if unsettled["n"] and queued:
+            health_reason = (f"{unsettled['n']} expired lease(s) holding {unsettled['mb']} MB, "
+                             f"unsettled, with {queued} waiting")
+            if health != "red":
+                health = "amber"
 
         # Stale check for display
         last_stats_display = "never"
@@ -12316,14 +12335,17 @@ def resources_dashboard(auth: Optional[AuthContext] = Depends(get_auth_optional)
             "device": r["device_id"],
             "type": r["type"],
             "provider": r["provider"],
-            "health": norm.get("health", "grey"),
+            "health": health,
+            "health_reason": health_reason,
             "memory_pct": norm.get("memory_pct", 0),
             "compute_pct": norm.get("compute_pct", 0),
             "temperature_c": util.get("temperature_c"),
             "power_draw_w": util.get("power_draw_w"),
             "leases": lease_count["n"] if lease_count else 0,
-            "queued": queued_count["n"] if queued_count else 0,
-            "available_memory_mb": _get_available_memory(r),
+            "queued": queued,
+            "unsettled": unsettled["n"],
+            "unsettled_memory_mb": unsettled["mb"],
+            "available_memory_mb": available,
             "last_stats": last_stats_display,
         })
     return result

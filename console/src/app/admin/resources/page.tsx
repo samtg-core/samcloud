@@ -10,11 +10,15 @@ interface DashboardResource {
   type: string;
   provider: string;
   health: string;
+  health_reason?: string | null;
   memory_pct: number;
   compute_pct: number;
   temperature_c: number | null;
   power_draw_w: number | null;
   leases: number;
+  queued?: number;
+  unsettled?: number;
+  unsettled_memory_mb?: number;
   available_memory_mb: number;
   last_stats: string;
 }
@@ -132,6 +136,10 @@ export default function ResourcesPage() {
                 <div><span className="text-zinc-600">Free </span><span className="font-mono text-zinc-400">{fmtMem(r.available_memory_mb)}</span></div>
                 <div><span className="text-zinc-600">Updated </span><span className="text-zinc-400">{r.last_stats}</span></div>
               </div>
+
+              {r.health_reason && (
+                <p className="text-xs text-amber-400">{r.health_reason}. Its holder or an admin settles it (DELETE /leases/&#123;id&#125;).</p>
+              )}
             </div>
           ))}
         </div>

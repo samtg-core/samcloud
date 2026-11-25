@@ -2,6 +2,11 @@
 
 What each release changed.
 
+## 2026-11-25 — The resource dashboard shows a `hold` pool jammed by an unsettled lease
+
+- **`GET /resources/dashboard`** now returns `unsettled` and `unsettled_memory_mb` for each resource: the expired leases a `hold` resource still charges until their holder or an admin settles them. While one of those has waiters queued behind it, `health` is amber (red stays red) and `health_reason` says how much memory it holds and how many are waiting. On 25 Nov a model-service lease leaked when a model load failed. Obelisk's gpu-0 then read green for five hours with a 108 GB unsettled lease, an exclusive waiter and a tsplat capture queued behind it (#1170). The console's Resources card shows the reason.
+- The dashboard reaps expired leases before it counts, so a holder past its TTL is counted as expired and not as active.
+
 ## 2026-11-25 — queue.md: make every release land
 
 - `queue.md` (skill 3.13.3), "Build a service": retry a release that gets no answer, a 5xx or a 429 with back-off, keep the id on disk until it's acknowledged, and retry what's pending periodically. A renew failing the same way is retried within the TTL. On a `hold` resource an expired lease keeps its memory until it is released. Two lost releases on 25 Nov held 32 GB of slice's GPU for three hours and 16 GB of Obelisk's (#1145).

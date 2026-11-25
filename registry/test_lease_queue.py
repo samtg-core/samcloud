@@ -195,6 +195,38 @@ def test_resource_read_shows_the_queue_and_the_dashboard_counts_it(client, resou
     assert dash['leases'] == 1 and dash['queued'] == 1
 
 
+
+def _dash(client):
+    return [r for r in client.get('/api/v1/resources/dashboard').json() if r['id'] == RID][0]
+
+
+def test_dashboard_flags_an_unsettled_hold_lease_with_a_queue_behind_it(client, resource):
+    """#1170: obelisk's gpu-0 read green for five hours while a dead 108 GB holder kept
+    an exclusive waiter, and everything behind it, out."""
+    db.execute("UPDATE resources SET expiry_policy='hold' WHERE id=?", (RID,))
+    holder = lease(client, resource, memory_mb=800, service_id=None)
+    backdate(holder['lease_id'])
+    calm = _dash(client)                       # expired and unsettled, but nobody waiting
+    assert calm['unsettled'] == 1 and calm['unsettled_memory_mb'] == 800
+    assert calm['health_reason'] is None and calm['health'] != 'amber'
+    lease(client, resource, memory_mb=600, exclusive=True, wait_s=600, service_id=None)
+    stuck = _dash(client)
+    assert stuck['queued'] == 1 and stuck['leases'] == 0
+    assert stuck['health'] == 'amber'
+    assert '800 MB' in stuck['health_reason'] and '1 waiting' in stuck['health_reason']
+    assert client.delete(f"/api/v1/leases/{holder['lease_id']}").status_code == 200   # the settle
+    after = _dash(client)
+    assert after['unsettled'] == 0 and after['health_reason'] is None
+    assert after['queued'] == 0 and after['leases'] == 1
+
+
+def test_dashboard_never_flags_a_free_resource(client, resource):
+    holder = lease(client, resource, memory_mb=800, service_id=None)
+    backdate(holder['lease_id'])
+    lease(client, resource, memory_mb=600, exclusive=True, wait_s=600, service_id=None)
+    got = _dash(client)
+    assert got['unsettled'] == 0 and got['health_reason'] is None and got['leases'] == 1
+
 def test_exclusive_resource_queues_a_second_holder_and_promotes_it_exclusive(client):
     from test_registry import _register_device
     _register_device(client, 'mutex-host', 'mutex-host')
