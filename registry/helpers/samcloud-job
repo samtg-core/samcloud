@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# JOB_VERSION: 1.0.0
+# JOB_VERSION: 1.0.1
 # Served as GET /api/v1/helpers/job. Install from the plane you call from:
 #   curl -s -H @"$HOME/.samcloud/__TOKEN_HDR__" __API__/helpers/job > ~/.local/bin/sc-job && chmod +x ~/.local/bin/sc-job
 """sc-job — call a service on the plane: submit a job, wait for it, keep what it made.
@@ -19,14 +19,17 @@
 <submit path> there, and polls until the job ends. It keeps waiting through
 dropped connections and 5xx answers, backing off up to a minute. On `done` it
 downloads every file the job's `results` name into --out (default ./<job>),
-and prints the files, the plane files you now own by role, and a line to embed
-the first image.
+and prints the files, then each plane file you now own: its role, its id and
+the markdown that embeds it. Those are already your files on the plane; paste
+the markdown, don't upload the downloads again.
 
 The job ends `done`, or as a failure: `failed`, `cancelled` (or `canceled`),
-`error` or `expired`. `queued` and `running` are waited out. Any other status,
-or none, is named once on stderr; after 20 such polls in a row, or 5 polls in a
-row that answer an error or no JSON, sc-job stops waiting (exit 2) and leaves
-the job and its grant alone, printing how to resume.
+`error` or `expired`. `queued` and `running` are waited out. Any other status
+is named once on stderr and waited out for as long as the answer changes (its
+status, stage, progress or position). After 20 polls in a row with the same such
+answer, or with no status at all, or 5 polls in a row that answer an error or no
+JSON, sc-job stops waiting (exit 2) and leaves the job and its grant alone,
+printing how to resume.
 
 --store GROUP mints a grant for that service and that plane group (one you
 edit, from `GET /groups`), adds it to BODY as "grant", and revokes it when the
@@ -34,8 +37,9 @@ job ends. --ttl is the grant's life (default 7200 s). With --no-wait, or if you
 stop waiting with Ctrl-C, the job carries on and the grant stays live until its
 ttl so the uploads still land; sc-job prints the `sc-job fetch … --grant ID`
 line that resumes, downloads and then revokes it. SIGTERM or SIGHUP revokes the
-grant (the job's uploads will then fail) and prints the fetch line. If a revoke
-fails it says so, prints the command, and carries on.
+grant (the job's uploads will then fail) and prints the fetch line; so does a
+Ctrl-C that comes with one, in either order. If a revoke fails it says so,
+prints the command, and carries on.
 
 What a service has to answer (tools.md, "Register a service"): the submit reply
 names `job` (and may name `poll`, else /jobs/<job>); the poll answers `status`,
@@ -50,7 +54,8 @@ Where it calls (as sc-say): --plane NAME (a plane the serving plane names) > $SA
 Auth — a 0600 header file, never the bearer on a command line (#582):
   --hdr FILE (must exist) > $SAMCLOUD_AUTH_HDR > ~/.samcloud/token.hdr
 The bearer goes only to the plane and to the service's own https address, and is
-never printed. API calls follow a redirect only to the same origin. A download
+never printed. Nor is a grant: any sc_grant_… in what sc-job prints (a service's
+error that echoes the request, --json, status) shows as sc_grant_[redacted]. API calls follow a redirect only to the same origin. A download
 may follow an https redirect to another host, without the bearer; a redirect to
 plain http is refused. Python 3 standard library only.
 """
@@ -74,8 +79,9 @@ OK = ("done",)
 FAILED = ("failed", "cancelled", "canceled", "error", "expired")
 WAITING = ("queued", "running")
 UNKNOWN_WARN_AFTER = 3     # polls with an unfamiliar status before it is named
-UNKNOWN_LIMIT = 20         # ... and before sc-job stops waiting
+UNKNOWN_LIMIT = 20         # polls in a row with no status, or an unfamiliar one that doesn't change
 POLL_BAD_LIMIT = 5         # polls in a row answering an error or no JSON
+EMBED_LIMIT = 24           # plane files whose record sc-job reads for their markdown
 try:
     _PLANES = json.loads('__PLANES_JSON__')
 except ValueError:          # an unrendered copy, run from a checkout
@@ -85,6 +91,7 @@ JOB_ID = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,127}")
 LOOPBACK = ("localhost", "127.0.0.1", "::1")
 ANSI = re.compile(r"\x1b\[[0-?]*[ -/]*[@-~]|\x1b\][^\x07\x1b]*(\x07|\x1b\\)?")
 CONTROL = re.compile(r"[\x00-\x1f\x7f-\x9f]")
+GRANT_SECRET = re.compile(r"sc_grant_[A-Za-z0-9_-]+")     # the plane mints sc_grant_ + token_urlsafe
 
 
 def _pair(name, default):
@@ -121,6 +128,20 @@ class Stopped(SystemExit):
     def __init__(self, signame):
         super().__init__(2)
         self.signame = signame
+
+
+class Redacted:
+    """A text stream that never shows a grant secret. Services echo requests in errors and job
+    records, and agents post terminal output on the plane."""
+
+    def __init__(self, stream):
+        self._stream = stream
+
+    def write(self, text):
+        return self._stream.write(GRANT_SECRET.sub("sc_grant_[redacted]", text))
+
+    def __getattr__(self, name):
+        return getattr(self._stream, name)
 
 
 def clean(value, limit=300):
@@ -287,23 +308,19 @@ class Client:
     @staticmethod
     def _stream(r, dest):
         """Write the body to a temp file beside dest, then put it in place."""
-        try:
-            expected = int(r.headers.get("Content-Length"))
-        except (TypeError, ValueError):
-            expected = None
         fd, tmp = tempfile.mkstemp(dir=dest.parent, prefix=".sc-job-")
         try:
-            got = 0
             with os.fdopen(fd, "wb") as f:
                 while True:
                     chunk = r.read(1 << 16)
                     if not chunk:
                         break
                     f.write(chunk)
-                    got += len(chunk)
-            # http.client returns short at EOF without raising: count against what was promised.
-            if expected is not None and got < expected:
-                raise http.client.IncompleteRead(b"", expected - got)
+            # At EOF short of a Content-Length, http.client returns what came without raising, and
+            # `length` is what's missing. A chunked body has no length (its framing ends it), and
+            # any Content-Length beside it is ignored, as http.client ignores it.
+            if getattr(r, "length", None):
+                raise http.client.IncompleteRead(b"", r.length)
             os.chmod(tmp, FILE_MODE)
             os.replace(tmp, dest)
         except BaseException:
@@ -423,7 +440,8 @@ def flatten(value, role=""):
 
 
 def wait(c, base, poll, job):
-    last, delay, odd, bad, warned = None, POLL_MIN, 0, 0, False
+    last, delay, bad = None, POLL_MIN, 0
+    answer, stale, odd, warned = None, 0, 0, False
     while True:
         try:
             j = c.call("GET", base + poll, tries=None, what=f"polling job {job}")
@@ -447,17 +465,21 @@ def wait(c, base, poll, job):
             delay = min(POLL_MAX, delay + POLL_MIN)
         if status in OK + FAILED:
             return j
+        seen = now + (json.dumps(j.get("progress"), sort_keys=True, default=str),)
         if status in WAITING:
-            odd = 0
+            stale = odd = 0
         else:
             odd += 1
             if odd >= UNKNOWN_WARN_AFTER and not warned:
                 warned = True
                 note(f"{PROG}: job {job} reports status {clean(status, 40)!r}, which sc-job doesn't know; "
                      f"still waiting for done, or one of {', '.join(FAILED)}")
-            if odd >= UNKNOWN_LIMIT:
-                raise PollLost(f"job {job} has reported no status sc-job knows for {odd} polls "
-                               f"(last: {clean(status, 40)!r})")
+            # A changing answer is progress, however the service names it; no status never is.
+            stale = stale + 1 if status is None or seen == answer else 1
+            if stale >= UNKNOWN_LIMIT:
+                raise PollLost(f"job {job} has answered " + ("no status" if status is None else
+                               f"status {clean(status, 40)!r}, unchanged,") + f" for {stale} polls")
+        answer = seen
         time.sleep(delay)
 
 
@@ -471,16 +493,22 @@ def progress(job, j):
     note(f"  {time.strftime('%H:%M:%S')} {job} {where}" + (f", position {clean(pos, 12)}" if pos else ""))
 
 
-def first_image(c, ids):
-    """Best effort: the first of up to three ids that the plane says is an image."""
-    for fid in ids[:3]:
+def embed(c, role, fid, look=True):
+    """The markdown for one plane file: the plane's own, if it points at that file, else built here."""
+    raw = f"/api/v1/files/{fid}/raw"
+    f = {}
+    if look:
         try:
             f = c.call("GET", f"{c.api}/files/{fid}", tries=1)
         except CallError:
-            continue
-        if str(f.get("content_type") or "").startswith("image/"):
-            return fid
-    return None
+            f = {}
+    md = f.get("markdown") if isinstance(f, dict) else None
+    if isinstance(md, str) and md.endswith(f"]({raw})") and md.isprintable() and len(md) <= 300:
+        return md
+    name = clean((f.get("name") if isinstance(f, dict) else None) or role.rsplit("/", 1)[-1], 80)
+    name = name.replace("[", "(").replace("]", ")")
+    image = str((f.get("content_type") if isinstance(f, dict) else "") or "").startswith("image/")
+    return f"{'!' if image else ''}[{name}]({raw})"
 
 
 def summary(c, j, job, out, rels):
@@ -495,12 +523,9 @@ def summary(c, j, job, out, rels):
         print(f"files in {out}/: {shown}")
     pf = list(flatten(j.get("plane_files")))
     if pf:
-        print("plane files you own:")
-        for role, fid in pf:
-            print(f"  {role} {fid}")
-        img = first_image(c, [fid for _, fid in pf])
-        if img is not None:
-            print(f"embed: ![](/api/v1/files/{img}/raw)")
+        print("plane files you own, already on the plane (paste the markdown; don't upload the downloads again):")
+        for n, (role, fid) in enumerate(pf):
+            print(f"  {role} {fid}  {embed(c, role, fid, look=n < EMBED_LIMIT)}")
     if j.get("plane_error"):
         print(f"plane upload: {clean(j['plane_error'])}")
     if j.get("expires"):
@@ -568,13 +593,23 @@ def kept_note(c, a, job, poll, grant, why):
         note(f"  or revoke it now:  {c.revoke_hint(grant['id'])}")
 
 
-def stopped_note(c, a, job, poll, grant, e):
+def stopped_note(c, a, job, poll, grant, signame):
     """SIGTERM or SIGHUP while waiting: the grant is revoked (signals ignored meanwhile), then the hint."""
-    note(f"\n{PROG}: stopped by {e.signame}. Job {job} carries on at the service.")
+    note(f"\n{PROG}: stopped by {signame}. Job {job} carries on at the service.")
     if grant:
         note(f"  revoking grant {clean(grant['id'], 40)}: the job's uploads to the plane will fail.")
         revoke(c, grant)
     note(f"  resume:  {fetch_hint(a, job, poll)}")
+
+
+def interrupted_note(c, a, job, poll, grant):
+    """Ctrl-C while waiting keeps the grant: someone chose to leave the job running. A SIGTERM or
+    SIGHUP with it (a closing terminal, a supervisor, timeout) means sc-job is being shut down,
+    perhaps with no one to read the hint: that wins, and the grant is revoked as for SIGTERM alone."""
+    if not _SIGNALS["stop"]:
+        kept_note(c, a, job, poll, grant, "stopped waiting")
+    if _SIGNALS["stop"]:                    # it came before the note, or during it
+        stopped_note(c, a, job, poll, grant, _SIGNALS["stop"])
 
 
 def cmd_call(c, a):
@@ -605,8 +640,8 @@ def cmd_call(c, a):
         try:
             j = wait(c, base, poll, job)
         except KeyboardInterrupt:
-            keep = True
-            kept_note(c, a, job, poll, grant, "stopped waiting")
+            keep = True                    # interrupted_note revokes it if a SIGTERM came too
+            interrupted_note(c, a, job, poll, grant)
             return 2
         except PollLost as e:
             keep = True
@@ -614,7 +649,7 @@ def cmd_call(c, a):
             return 2
         except Stopped as e:
             keep = True                    # stopped_note revokes it, with signals ignored
-            stopped_note(c, a, job, poll, grant, e)
+            stopped_note(c, a, job, poll, grant, e.signame)
             raise
     finally:
         if grant and not keep:
@@ -633,7 +668,7 @@ def cmd_fetch(c, a):
             j = wait(c, base, poll, job)
         except KeyboardInterrupt:
             keep = True
-            kept_note(c, a, job, poll, grant, "stopped waiting")
+            interrupted_note(c, a, job, poll, grant)
             return 2
         except PollLost as e:
             keep = True
@@ -641,7 +676,7 @@ def cmd_fetch(c, a):
             return 2
         except Stopped as e:
             keep = True
-            stopped_note(c, a, job, poll, grant, e)
+            stopped_note(c, a, job, poll, grant, e.signame)
             raise
         return finish(c, a, base, poll, job, j)
     finally:
@@ -660,15 +695,33 @@ def cmd_list(c, a):
     return 0
 
 
+# The first signal starts the way out and later ones are ignored, so a second one can't cut its
+# note or its revoke short. A stop after a Ctrl-C is remembered: interrupted_note revokes for it.
+_SIGNALS = {"first": None, "stop": None}
+
+
 def _stop(signum, _frame):
-    raise Stopped(signal.Signals(signum).name)
+    name = signal.Signals(signum).name
+    if _SIGNALS["first"] is None:
+        _SIGNALS["first"] = _SIGNALS["stop"] = name
+        raise Stopped(name)
+    if _SIGNALS["first"] == "SIGINT" and not _SIGNALS["stop"]:
+        _SIGNALS["stop"] = name
+
+
+def _interrupt(_signum, _frame):
+    if _SIGNALS["first"] is None:
+        _SIGNALS["first"] = "SIGINT"
+        raise KeyboardInterrupt
 
 
 def install_signals():
     signal.signal(signal.SIGTERM, _stop)
-    # Under nohup SIGHUP is ignored on purpose: leave it that way.
+    # Under nohup SIGHUP is ignored on purpose, and SIGINT under `&`: leave them that way.
     if hasattr(signal, "SIGHUP") and signal.getsignal(signal.SIGHUP) != signal.SIG_IGN:
         signal.signal(signal.SIGHUP, _stop)
+    if signal.getsignal(signal.SIGINT) is signal.default_int_handler:
+        signal.signal(signal.SIGINT, _interrupt)
 
 
 def main():
@@ -719,6 +772,7 @@ def main():
 
 
 def run():
+    sys.stdout, sys.stderr = Redacted(sys.stdout), Redacted(sys.stderr)
     try:
         sys.exit(main())
     except CallError as e:

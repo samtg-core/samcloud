@@ -12,8 +12,10 @@ import importlib.machinery
 import importlib.util
 import json
 import os
+import re
 import signal
 import socket
+import struct
 import subprocess
 import sys
 import tempfile
@@ -41,7 +43,7 @@ class State:
         self.plane, self.service, self.other = [], [], []
         self.polls, self.bodies = {}, {}
         self.grants, self.revoked = {}, set()
-        self.posts = {}
+        self.posts, self.gets = {}, {}
         self.next_grant = 20
 
 
@@ -110,7 +112,15 @@ class Plane(Base):
             fid = p.rsplit("/", 1)[1]
             if fid == "999":
                 return self.send(404, {"detail": "no such file"})
-            return self.send(200, {"id": int(fid), "content_type": "image/png" if fid == "101" else "application/json"})
+            if fid == "101":
+                return self.send(200, {"id": 101, "name": "sheet.png", "content_type": "image/png",
+                                       "markdown": "![sheet.png](/api/v1/files/101/raw)"})
+            if fid == "102":
+                return self.send(200, {"id": 102, "name": "a-01.jpg", "content_type": "image/jpeg"})
+            if fid == "103":
+                return self.send(200, {"id": 103, "name": "x.png", "content_type": "image/png",
+                                       "markdown": "![x](https://elsewhere.example/x.png)"})
+            return self.send(200, {"id": int(fid), "content_type": "application/json"})
         return self.send(404, {"detail": f"plane has no {method} {p}"})
 
     def do_GET(self):
@@ -125,12 +135,19 @@ class Plane(Base):
 
 SCENARIOS = {"ok": "J1", "fail": "J2", "escape": "J3", "redirect": "J4", "cancel": "J5", "link": "J6",
              "blips": "J7", "slow": "J8", "odd": "J9", "canceled": "J10", "flaky": "J11", "apiredir": "J13",
-             "rate": "J14", "truncated": "J15", "lost404": "J16", "lost": "J17", "nostatus": "J18", "unicode": "J19"}
+             "rate": "J14", "truncated": "J15", "lost404": "J16", "lost": "J17", "nostatus": "J18", "unicode": "J19",
+             "echo": "J20", "busy": "J21", "stuck": "J22", "longrun": "J23", "blank": "J24", "error": "J25",
+             "big": "J27", "chunked": "J28", "shortbig": "J29", "dropdl": "J30", "truncdl": "J31",
+             "resetdl": "J32", "slowdl": "J33", "patchy": "J34", "mixed": "J35", "list": "J36",
+             "inching": "J37"}
 REPLIES = {"badjob": {"job": "x/evil1"}, "badpoll": {"job": "J12", "poll": "/jobs/../evilpoll"}}
 FILES = {"/jobs/J1/files/sheet.png": b"PNGDATA", "/jobs/J1/files/stills/a-01.jpg": b"JPGDATA",
          "/jobs/J6/files/link/x.txt": b"LINKED", "/jobs/J7/files/out.txt": b"AFTERBLIPS",
          "/jobs/J11/files/out.txt": b"FLAKYOK", "/jobs/J14/files/out.txt": b"AFTER429",
          "/jobs/J19/files/my sheet é.png": b"SPACED", "/jobs/J19/files/stills/café 01.jpg": b"ACCENTED"}
+
+
+BIG = bytes(range(256)) * 800                  # 204800 bytes, not all one value
 
 
 def job_doc(job, n):
@@ -141,7 +158,7 @@ def job_doc(job, n):
                 "results": {"sheet": f"/jobs/{job}/files/sheet.png", "note": "plain text, not a file",
                             "cameras": [{"shots": [{"still": f"/jobs/{job}/files/stills/a-01.jpg"}]}],
                             "elsewhere": "/jobs/OTHER/files/x.png"},
-                "plane_files": {"missing": 999, "sheet": 101, "stills": {"a-01.jpg": 102}, "odd": "²"}}
+                "plane_files": {"missing": 999, "sheet": 101, "stills": {"a-01.jpg": 102}, "odd": "²", "lure": 103}}
     if job == "J2":
         return {"job": job, "status": "failed", "error": "boom \x1b]0;pwned\x07here"}
     if job == "J3":
@@ -162,12 +179,39 @@ def job_doc(job, n):
         return {"job": job, "status": "canceled"}
     if job in ("J11", "J14", "J7"):
         return {"job": job, "status": "done", "results": [f"/jobs/{job}/files/out.txt"]}
+    if job in ("J30", "J31", "J32", "J33"):
+        return {"job": job, "status": "done", "results": [f"/jobs/{job}/files/f.bin"]}
+    if job == "J34":                              # 404s in fours, a good poll between: never five in a row
+        return {"job": job, "status": "running"} if n == 4 else {"job": job, "status": "done", "results": []}
+    if job == "J35":                              # two unfamiliar, running, one unfamiliar: never three in a row
+        return {"job": job, "status": ["rendering", "rendering", "running", "rendering"][n]} if n < 4 else \
+               {"job": job, "status": "done", "results": []}
+    if job == "J36":                              # JSON, but not an object, twice
+        return [] if n < 2 else {"job": job, "status": "done", "results": []}
+    if job in ("J27", "J28", "J29"):
+        return {"job": job, "status": "done", "results": [f"/jobs/{job}/files/big.bin"]}
     if job == "J15":
         return {"job": job, "status": "done", "results": [f"/jobs/{job}/files/big.bin"]}
     if job == "J16" and n >= 2:
         return {"job": job, "status": "done", "results": []}
     if job == "J18":
         return {"job": job}
+    if job in ("J21", "J26"):                     # a status sc-job doesn't know, but moving
+        return {"job": job, "status": "processing", "stage": f"frame {n}"} if n < 30 else \
+               {"job": job, "status": "done", "results": []}
+    if job == "J37":                              # the same unfamiliar status and stage; only progress moves
+        return {"job": job, "status": "processing", "stage": "frames", "progress": n / 30} if n < 30 else \
+               {"job": job, "status": "done", "results": []}
+    if job == "J22":                              # the same unfamiliar answer, for ever
+        return {"job": job, "status": "processing", "stage": "frames"}
+    if job == "J23":                              # running, unchanged, for longer than the cap
+        return {"job": job, "status": "running"} if n < 30 else {"job": job, "status": "done", "results": []}
+    if job == "J24":                              # no status, though something changes
+        return {"job": job, "stage": f"frame {n}"}
+    if job == "J25":
+        return {"job": job, "status": "error", "error": "out of memory"}
+    if job == "J20":                              # echoes the request it was given, grant and all
+        return {"job": job, "status": "done", "results": [], "request": S.bodies.get(job)}
     if job == "J19":
         return {"job": job, "status": "done",
                 "results": [f"/jobs/{job}/files/my%20sheet%20%C3%A9.png", f"/jobs/{job}/files/stills/café 01.jpg"]}
@@ -182,8 +226,13 @@ class Service(Base):
         scenario = (body or {}).get("scenario")
         with S.lock:
             S.posts[scenario] = S.posts.get(scenario, 0) + 1
+        if scenario == "strict422":              # a model that forbids extra fields echoes the grant
+            return self.send(422, {"detail": [{"type": "extra_forbidden", "loc": ["body", "grant"],
+                                               "msg": "Extra inputs are not permitted", "input": body.get("grant")}]})
         if scenario == "submit500":
             return self.send(500, {"error": "can't take it"})
+        if scenario == "submit503":              # counted on its own: the 5xx-is-not-re-sent check
+            return self.send(503, {"error": "busy"})
         if scenario == "dropsubmit":             # took the body, then the line went dead
             self.close_connection = True
             self.connection.shutdown(socket.SHUT_RDWR)
@@ -218,10 +267,48 @@ class Service(Base):
                 return self.send(429, {"error": "slow down"}, headers=[("Retry-After", "0")])
             if parts[2] == "J13":
                 return self.send(302, raw=b"", headers=[("Location", f"{OTHER_URL}/evilredir")])
+            if parts[2] == "J34" and n != 4 and n < 9:
+                return self.send(404, {"error": "no such job (yet)"})
             if parts[2] in ("J16", "J17") and (parts[2] == "J17" or n < 2):
                 return self.send(404, {"error": "no such job (yet)"})
             d = job_doc(parts[2], n)
-            return self.send(200, d) if d else self.send(404, {"error": "no such job"})
+            return self.send(200, d) if d is not None else self.send(404, {"error": "no such job"})
+        if self.path.startswith("/jobs/J3") and self.path.endswith("/files/f.bin"):
+            with S.lock:
+                n = S.gets.get(self.path, 0)
+                S.gets[self.path] = n + 1
+            if n == 0 and "J30" in self.path:         # first try: no status line at all
+                self.close_connection = True
+                return
+            if n == 0 and "J31" in self.path:         # first try: short of its Content-Length
+                self.send_response(200)
+                self.send_header("Content-Length", "100000")
+                self.end_headers()
+                self.wfile.write(b"x" * 1000)
+                self.wfile.flush()
+                self.close_connection = True
+                self.connection.shutdown(socket.SHUT_RDWR)
+                return
+            if n == 0 and "J32" in self.path:         # first try: reset mid-body (a bare ConnectionResetError)
+                self.send_response(200)
+                self.send_header("Content-Length", "100000")
+                self.end_headers()
+                self.wfile.write(b"x" * 1000)
+                self.wfile.flush()
+                self.connection.setsockopt(socket.SOL_SOCKET, socket.SO_LINGER, struct.pack("ii", 1, 0))
+                self.close_connection = True
+                self.connection.close()
+                return
+            if "J33" in self.path:                    # a slow body: 1000 bytes, then nothing for 20 s
+                self.send_response(200)
+                self.send_header("Content-Length", "100000")
+                self.end_headers()
+                self.wfile.write(b"x" * 1000)
+                self.wfile.flush()
+                time.sleep(20)
+                self.close_connection = True
+                return
+            return self.send(200, raw=b"SECONDTRY")
         if "escape" in self.path:
             return self.send(200, raw=b"ESCAPED")
         if self.path == "/jobs/J15/files/big.bin":   # promise 100000 bytes, send 1000, cut the line
@@ -229,6 +316,27 @@ class Service(Base):
             self.send_header("Content-Length", "100000")
             self.end_headers()
             self.wfile.write(b"x" * 1000)
+            self.wfile.flush()
+            self.close_connection = True
+            self.connection.shutdown(socket.SHUT_RDWR)
+            return
+        if self.path == "/jobs/J27/files/big.bin":   # well past one 64 KiB read
+            return self.send(200, raw=BIG)
+        if self.path == "/jobs/J28/files/big.bin":   # chunked, with a Content-Length that chunking overrides
+            self.send_response(200)
+            self.send_header("Content-Length", "999999")    # more than the body: a check on it would fail
+            self.send_header("Transfer-Encoding", "chunked")
+            self.end_headers()
+            for i in range(0, len(BIG), 70000):
+                part = BIG[i:i + 70000]
+                self.wfile.write(b"%x\r\n" % len(part) + part + b"\r\n")
+            self.wfile.write(b"0\r\n\r\n")
+            return
+        if self.path == "/jobs/J29/files/big.bin":   # promise 300000, send 200000 (past the first read), cut
+            self.send_response(200)
+            self.send_header("Content-Length", "300000")
+            self.end_headers()
+            self.wfile.write(BIG[:200000])
             self.wfile.flush()
             self.close_connection = True
             self.connection.shutdown(socket.SHUT_RDWR)
@@ -403,7 +511,10 @@ def unit(m, tmp):
 def main():
     global HDR
     os.umask(0o022)
-    signal.signal(signal.SIGHUP, signal.SIG_DFL)   # the helpers we start must not inherit an ignored SIGHUP (nohup)
+    # The helpers we start must not inherit an ignored SIGHUP (nohup) or SIGINT (`&` in a
+    # non-interactive shell): the signal checks below would hang or crash.
+    signal.signal(signal.SIGHUP, signal.SIG_DFL)
+    signal.signal(signal.SIGINT, signal.default_int_handler)
     tmp = tempfile.mkdtemp(prefix="sc-job-")
     HDR = os.path.join(tmp, "token.hdr")
     Path(HDR).write_text(f"Authorization: {TOKEN}\n")
@@ -425,7 +536,16 @@ def main():
     check("the summary names the job, its timings and the files",
           "job J1: done · waited 3 s, render 4 s" in r.stdout and "sheet.png" in r.stdout, r.stdout)
     check("plane files are listed by role", "  sheet 101" in r.stdout and "  stills/a-01.jpg 102" in r.stdout, r.stdout)
-    check("the embed line names the first image, past a 404", "embed: ![](/api/v1/files/101/raw)" in r.stdout, r.stdout)
+    check("the summary says the plane files are already yours, not to re-upload",
+          "already on the plane" in r.stdout and "don't upload the downloads again" in r.stdout, r.stdout)
+    check("each plane file is printed with the plane's markdown",
+          "  sheet 101  ![sheet.png](/api/v1/files/101/raw)" in r.stdout, r.stdout)
+    check("a file with no markdown gets one built from its name and type",
+          "  stills/a-01.jpg 102  ![a-01.jpg](/api/v1/files/102/raw)" in r.stdout, r.stdout)
+    check("a file the plane can't read still gets a link to it",
+          "  missing 999  [missing](/api/v1/files/999/raw)" in r.stdout, r.stdout)
+    check("markdown pointing anywhere but that file is not printed",
+          "elsewhere.example" not in r.stdout and "  lure 103  ![x.png](/api/v1/files/103/raw)" in r.stdout, r.stdout)
     g = minted_since(mark)
     check("the grant rode in the body, top-level", len(g) == 1 and S.bodies.get("J1", {}).get("grant") == f"sc_grant_{g[0]}",
           S.bodies.get("J1"))
@@ -510,6 +630,67 @@ def main():
     check("a second SIGTERM during the revoke is ignored: the revoke finishes and the hint is printed",
           p.returncode == 2 and g and g[0] in S.revoked and "resume:  sc-job fetch dev/render J8" in e, (p.returncode, g, e))
     mark = S.next_grant
+    mark = S.next_grant
+    before = S.polls.get("J8", 0)
+    p = subprocess.Popen([sys.executable, str(HELPER), "call", "dev/render", "/render", '{"scenario":"slow"}',
+                          "--store", "projects", "--out", "o-amp"], cwd=tmp, env=env_for(tmp),
+                         stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
+                         preexec_fn=lambda: signal.signal(signal.SIGINT, signal.SIG_IGN))
+    wait_polls(before)
+    p.send_signal(signal.SIGINT)
+    time.sleep(0.5)
+    alive, polled = p.poll() is None, S.polls.get("J8", 0)
+    time.sleep(0.3)
+    still_polling = S.polls.get("J8", 0) > polled
+    p.send_signal(signal.SIGTERM)
+    o, e = p.communicate(timeout=30)
+    g = minted_since(mark)
+    check("started with SIGINT ignored (`&`), a SIGINT changes nothing: it keeps waiting, the grant stays",
+          alive and still_polling and "stopped waiting" not in e and g and "stopped by SIGTERM" in e,
+          (alive, still_polling, g, e[-300:]))
+    for sig in (signal.SIGINT, signal.SIGTERM):
+        mark = S.next_grant
+        p = subprocess.Popen([sys.executable, str(HELPER), "call", "dev/render", "/render", '{"scenario":"ok"}',
+                              "--store", "slowrevoke", "--out", f"o-done-{sig.name}"], cwd=tmp, env=env_for(tmp),
+                             stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+        deadline = time.time() + 20
+        while time.time() < deadline and not [x for x in S.plane if x[0] == "DELETE" and x[1].startswith("/api/v1/grants/")
+                                              and int(x[1].rsplit("/", 1)[1]) >= mark]:
+            time.sleep(0.02)
+        time.sleep(0.3)
+        p.send_signal(sig)
+        o, e = p.communicate(timeout=30)
+        check(f"a {sig.name} during the revoke after a done job is ignored: the files still land (exit 0)",
+              p.returncode == 0 and content(Path(tmp) / f"o-done-{sig.name}/sheet.png") == b"PNGDATA",
+              (p.returncode, e[-300:]))
+    for first, second in ((signal.SIGINT, signal.SIGTERM), (signal.SIGTERM, signal.SIGINT)):
+        for trial in range(2):
+            mark = S.next_grant
+            before = S.polls.get("J8", 0)
+            p = subprocess.Popen([sys.executable, str(HELPER), "call", "dev/render", "/render", '{"scenario":"slow"}',
+                                  "--store", "projects", "--out", "o-both"], cwd=tmp, env=env_for(tmp),
+                                 stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+            wait_polls(before)
+            p.send_signal(first)
+            p.send_signal(second)
+            o, e = p.communicate(timeout=30)
+            g = minted_since(mark)
+            check(f"{first.name} and {second.name} together (try {trial + 1}): the stop wins, so the grant is "
+                  "revoked and the fetch line printed (exit 2)",
+                  p.returncode == 2 and g and g[0] in S.revoked and "stopped by SIGTERM" in e
+                  and "resume:  sc-job fetch dev/render J8" in e and "Traceback" not in e, (p.returncode, g, e[-400:]))
+    mark = S.next_grant
+    p, o, e = interrupted(["call", "dev/render", "/render", '{"scenario":"slow"}', "--store", "slowrevoke", "--out", "o-tint"],
+                          tmp, signal.SIGTERM, then=(0.4, signal.SIGINT))
+    g = minted_since(mark)
+    check("a Ctrl-C during the revoke is ignored: the revoke finishes and the hint is printed",
+          p.returncode == 2 and g and g[0] in S.revoked and "resume:  sc-job fetch dev/render J8" in e
+          and "interrupted" not in e, (p.returncode, g, e))
+    p, o, e = interrupted(["fetch", "dev/render", "J8", "--grant", "903", "--out", "o-fterm"], tmp, signal.SIGTERM)
+    check("SIGTERM during fetch --grant revokes that grant and prints the fetch line (exit 2)",
+          p.returncode == 2 and 903 in S.revoked and "stopped by SIGTERM" in e
+          and "resume:  sc-job fetch dev/render J8" in e, (p.returncode, e))
+    mark = S.next_grant
     p, o, e = interrupted(["call", "dev/render", "/render", '{"scenario":"slow"}', "--store", "projects", "--out", "o-int"],
                           tmp, signal.SIGINT)
     g = minted_since(mark)
@@ -560,11 +741,96 @@ def main():
     check("a job with no status stops the wait after 20 polls (exit 2), keeping the grant",
           r.returncode == 2 and g and g[0] not in S.revoked and f"sc-job fetch dev/render J18 --grant {g[0]}" in r.stderr
           and S.polls.get("J18") == 20, (r.returncode, g, S.polls.get("J18"), r.stderr[-300:]))
+    r = run(["call", "dev/render", "/render", '{"scenario":"busy"}'], tmp)
+    check("an unfamiliar status whose stage keeps changing is waited out past 20 polls (exit 0)",
+          r.returncode == 0 and "job J21: done" in r.stdout and S.polls.get("J21", 0) > 20,
+          (r.returncode, S.polls.get("J21"), r.stderr[-300:]))
+    r = run(["fetch", "dev/render", "J26"], tmp)
+    check("... and so is it by fetch", r.returncode == 0 and "job J26: done" in r.stdout and S.polls.get("J26", 0) > 20,
+          (r.returncode, S.polls.get("J26"), r.stderr[-300:]))
+    r = run(["call", "dev/render", "/render", '{"scenario":"inching"}'], tmp)
+    check("an unfamiliar status whose progress alone moves is waited out past 20 polls (exit 0)",
+          r.returncode == 0 and "job J37: done" in r.stdout and S.polls.get("J37", 0) > 20,
+          (r.returncode, S.polls.get("J37"), r.stderr[-300:]))
+    r = run(["call", "dev/render", "/render", '{"scenario":"stuck"}'], tmp)
+    check("an unfamiliar status that doesn't change stops the wait after 20 polls (exit 2)",
+          r.returncode == 2 and S.polls.get("J22") == 20 and "sc-job fetch dev/render J22" in r.stderr,
+          (r.returncode, S.polls.get("J22"), r.stderr[-300:]))
+    r = run(["call", "dev/render", "/render", '{"scenario":"longrun"}'], tmp)
+    check("'running', unchanged for 30 polls, is waited out (exit 0)",
+          r.returncode == 0 and "job J23: done" in r.stdout, (r.returncode, S.polls.get("J23"), r.stderr[-300:]))
+    r = run(["call", "dev/render", "/render", '{"scenario":"blank"}'], tmp)
+    check("no status stops the wait after 20 polls even while the stage changes (exit 2)",
+          r.returncode == 2 and S.polls.get("J24") == 20, (r.returncode, S.polls.get("J24"), r.stderr[-300:]))
+    r = run(["call", "dev/render", "/render", '{"scenario":"error"}'], tmp)
+    check("'error' ends the wait at once, exit 1, with the error",
+          r.returncode == 1 and S.polls.get("J25") == 1 and "job J25: error · out of memory" in r.stdout,
+          (r.returncode, S.polls.get("J25"), r.stdout + r.stderr[-300:]))
+    r = run(["call", "dev/render", "/render", '{"scenario":"patchy"}'], tmp)
+    check("eight failed polls, never five in a row, are waited out: a good poll resets the count (exit 0)",
+          r.returncode == 0 and "job J34: done" in r.stdout and S.polls.get("J34") == 10,
+          (r.returncode, S.polls.get("J34"), r.stderr[-300:]))
+    r = run(["call", "dev/render", "/render", '{"scenario":"mixed"}'], tmp)
+    check("an unfamiliar status is not named when 'running' breaks the run of three",
+          r.returncode == 0 and "doesn't know" not in r.stderr, (r.returncode, r.stderr[-300:]))
+    r = run(["call", "dev/render", "/render", '{"scenario":"list"}'], tmp)
+    check("a poll that answers JSON but not an object is refused, retried, and waited out (exit 0)",
+          r.returncode == 0 and "job J36: done" in r.stdout and "did not answer a JSON object" in r.stderr,
+          (r.returncode, r.stderr[-300:]))
     r = run(["call", "dev/render", "/render", '{"scenario":"odd"}'], tmp)
     check("an unknown status is named once, then expired exits 1",
           r.returncode == 1 and r.stderr.count("doesn't know") == 1 and "job J9: expired" in r.stdout, r.stdout + r.stderr)
     r = run(["call", "dev/render", "/render", '{"scenario":"canceled"}'], tmp)
     check("'canceled' ends the wait, exit 1", r.returncode == 1 and "job J10: canceled" in r.stdout, r.stdout + r.stderr)
+
+    print("sc-job — a grant is never printed")
+    secret = re.compile(r"sc_grant_\d")
+    mark = S.next_grant
+    r = run(["call", "dev/render", "/render", '{"scenario":"strict422"}', "--store", "projects"], tmp)
+    g = minted_since(mark)
+    check("a 422 that echoes the grant prints it redacted, and the grant is revoked (exit 2)",
+          r.returncode == 2 and not secret.search(r.stdout + r.stderr) and "sc_grant_[redacted]" in r.stderr
+          and g and g[0] in S.revoked, (r.returncode, g, r.stderr))
+    r = run(["call", "dev/render", "/render", '{"scenario":"echo"}', "--store", "projects", "--json", "--out", "o-echo"], tmp)
+    check("--json of a job that echoes the request prints the grant redacted",
+          r.returncode == 0 and not secret.search(r.stdout + r.stderr)
+          and json.loads(r.stdout)["request"]["grant"] == "sc_grant_[redacted]", (r.returncode, r.stdout, r.stderr))
+    r = run(["status", "dev/render", "J20"], tmp)
+    check("status of that job prints the grant redacted",
+          r.returncode == 0 and not secret.search(r.stdout) and "sc_grant_[redacted]" in r.stdout, r.stdout)
+
+    print("sc-job — downloads retried, and stopped")
+    for scenario, job, what in (("dropdl", "J30", "no status line (RemoteDisconnected)"),
+                                ("truncdl", "J31", "a body cut short (IncompleteRead)"),
+                                ("resetdl", "J32", "a reset mid-body (ConnectionResetError)")):
+        r = run(["call", "dev/render", "/render", json.dumps({"scenario": scenario}), "--out", f"o-{scenario}"], tmp)
+        check(f"a download that first fails with {what} is retried and lands (exit 0)",
+              r.returncode == 0 and content(Path(tmp) / f"o-{scenario}/f.bin") == b"SECONDTRY"
+              and S.gets.get(f"/jobs/{job}/files/f.bin") == 2, (r.returncode, S.gets.get(f"/jobs/{job}/files/f.bin"), r.stderr[-300:]))
+    mark = S.next_grant
+    p = subprocess.Popen([sys.executable, str(HELPER), "call", "dev/render", "/render", '{"scenario":"slowdl"}',
+                          "--store", "projects", "--out", "o-slowdl"], cwd=tmp, env=env_for(tmp),
+                         stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+    deadline = time.time() + 20
+    while not S.gets.get("/jobs/J33/files/f.bin") and time.time() < deadline:
+        time.sleep(0.02)
+    time.sleep(0.3)
+    g = minted_since(mark)
+    revoked_first = bool(g) and g[0] in S.revoked
+    p.send_signal(signal.SIGTERM)
+    try:
+        o, e = p.communicate(timeout=8)
+        ended = True
+    except subprocess.TimeoutExpired:
+        p.kill()
+        o, e = p.communicate()
+        ended = False
+    check("SIGTERM during a download after the revoke still stops sc-job (handlers restored after a revoke)",
+          revoked_first and ended and p.returncode == 2, (revoked_first, ended, p.returncode, e[-300:]))
+    check("... and leaves no temp file (cleanup on any exception, not only Exception)",
+          (Path(tmp) / "o-slowdl").exists() and not list((Path(tmp) / "o-slowdl").glob(".sc-job-*"))
+          and not (Path(tmp) / "o-slowdl/f.bin").exists(), sorted(q.name for q in (Path(tmp) / "o-slowdl").iterdir())
+          if (Path(tmp) / "o-slowdl").exists() else "no dir")
 
     print("sc-job — refusals")
     r = run(["call", "dev/render", "/render", '{"scenario":"escape"}', "--out", "j3"], tmp)
@@ -597,6 +863,18 @@ def main():
     check("... and a file already there is left as it was (written via a temp file)",
           content(Path(tmp) / "o-trunc2/big.bin") == b"OLD" and not list((Path(tmp) / "o-trunc2").glob(".sc-job-*")),
           sorted(q.name for q in (Path(tmp) / "o-trunc2").iterdir()))
+    r = run(["call", "dev/render", "/render", '{"scenario":"big"}', "--out", "o-big"], tmp)
+    check("a 200 KiB download lands whole", r.returncode == 0 and content(Path(tmp) / "o-big/big.bin") == BIG,
+          (r.returncode, len(content(Path(tmp) / "o-big/big.bin") or b""), r.stderr[-300:]))
+    r = run(["call", "dev/render", "/render", '{"scenario":"chunked"}', "--out", "o-chunk"], tmp)
+    check("a chunked download with a stray Content-Length lands whole (exit 0)",
+          r.returncode == 0 and content(Path(tmp) / "o-chunk/big.bin") == BIG,
+          (r.returncode, len(content(Path(tmp) / "o-chunk/big.bin") or b""), r.stderr[-300:]))
+    r = run(["call", "dev/render", "/render", '{"scenario":"shortbig"}', "--out", "o-shortbig"], tmp)
+    check("a download cut short after 200 KB of its 300 KB fails, leaving no file and no temp file",
+          r.returncode not in (0, None) and not (Path(tmp) / "o-shortbig/big.bin").exists()
+          and not list((Path(tmp) / "o-shortbig").glob(".sc-job-*")),
+          (r.returncode, sorted(q.name for q in (Path(tmp) / "o-shortbig").iterdir()) if (Path(tmp) / "o-shortbig").exists() else "no dir"))
     r = run(["call", "dev/render", "/render", '{"scenario":"unicode"}', "--out", "o-uni"], tmp)
     check("result names with spaces and non-ASCII letters download",
           r.returncode == 0 and content(Path(tmp) / "o-uni/my sheet é.png") == b"SPACED"
@@ -618,6 +896,9 @@ def main():
     check("a submit that fails after sending is not re-sent (one POST), and says it may have landed",
           r.returncode == 2 and S.posts.get("dropsubmit") == 1 and "may have" in r.stderr,
           (r.returncode, S.posts.get("dropsubmit"), r.stderr))
+    r = run(["call", "dev/render", "/render", '{"scenario":"submit503"}', "--store", "projects"], tmp)
+    check("a submit answered 503 is not re-sent (one POST), exit 2",
+          r.returncode == 2 and S.posts.get("submit503") == 1, (r.returncode, S.posts.get("submit503"), r.stderr))
     r = run(["call", "dev/plain", "/render", "{}"], tmp)
     check("a service on plain http off loopback is refused", r.returncode == 2 and "refusing" in r.stderr, r.stderr)
     r = run(["call", "dev/render", "/../admin", "{}"], tmp)
