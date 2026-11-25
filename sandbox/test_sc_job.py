@@ -10,6 +10,7 @@ Run: python3 sandbox/test_sc_job.py
 """
 import importlib.machinery
 import importlib.util
+import hashlib
 import json
 import os
 import re
@@ -44,10 +45,22 @@ class State:
         self.polls, self.bodies = {}, {}
         self.grants, self.revoked = {}, set()
         self.posts, self.gets = {}, {}
+        self.secrets = []
         self.next_grant = 20
 
 
 S = State()
+
+
+def grant_secret(gid):
+    """Shaped like the plane's own ("sc_grant_" + token_urlsafe(32): 43 of [A-Za-z0-9_-]), with a
+    '-' and a '_' in it, so a pattern missing either can't hide it."""
+    return "sc_grant_" + (f"{gid:04d}-Ab_" + hashlib.sha256(str(gid).encode()).hexdigest())[:43]
+
+
+def leaked(text):
+    """Any part of a grant this run minted, in text sc-job printed."""
+    return any(s[9:21] in text or s[-14:] in text for s in S.secrets)
 
 
 def server(handler_cls):
@@ -99,7 +112,10 @@ class Plane(Base):
                 S.grants[gid] = body["group_scope"]
             if body["group_scope"] == "nogrant":     # a mint answer missing its secret
                 return self.send(200, {"id": gid, "expires_at": "later"})
-            return self.send(200, {"id": gid, "grant": f"sc_grant_{gid}", "expires_at": "later"})
+            secret = grant_secret(gid)
+            with S.lock:
+                S.secrets.append(secret)
+            return self.send(200, {"id": gid, "grant": secret, "expires_at": "later"})
         if method == "DELETE" and p.startswith("/api/v1/grants/"):
             gid = int(p.rsplit("/", 1)[1])
             if S.grants.get(gid) == "flaky":
@@ -136,7 +152,7 @@ class Plane(Base):
 SCENARIOS = {"ok": "J1", "fail": "J2", "escape": "J3", "redirect": "J4", "cancel": "J5", "link": "J6",
              "blips": "J7", "slow": "J8", "odd": "J9", "canceled": "J10", "flaky": "J11", "apiredir": "J13",
              "rate": "J14", "truncated": "J15", "lost404": "J16", "lost": "J17", "nostatus": "J18", "unicode": "J19",
-             "echo": "J20", "busy": "J21", "stuck": "J22", "longrun": "J23", "blank": "J24", "error": "J25",
+             "echo": "J20", "leaky": "J38", "leakyfail": "J39", "busy": "J21", "stuck": "J22", "longrun": "J23", "blank": "J24", "error": "J25",
              "big": "J27", "chunked": "J28", "shortbig": "J29", "dropdl": "J30", "truncdl": "J31",
              "resetdl": "J32", "slowdl": "J33", "patchy": "J34", "mixed": "J35", "list": "J36",
              "inching": "J37"}
@@ -210,6 +226,14 @@ def job_doc(job, n):
         return {"job": job, "stage": f"frame {n}"}
     if job == "J25":
         return {"job": job, "status": "error", "error": "out of memory"}
+    if job in ("J38", "J39"):                     # the grant it was given, echoed wherever sc-job prints
+        grant = (S.bodies.get(job) or {}).get("grant", "")
+        if job == "J39":
+            return {"job": job, "status": "failed", "error": f"refused grant {grant}"}
+        if n == 0:
+            return {"job": job, "status": "running", "stage": f"checking {grant}"}
+        return {"job": job, "status": "done", "plane_error": f"upload refused for {grant}",
+                "results": [f"/jobs/{job}/files/{grant}.txt", f"/jobs/{job}/files/sc_grant_report-2026.txt"]}
     if job == "J20":                              # echoes the request it was given, grant and all
         return {"job": job, "status": "done", "results": [], "request": S.bodies.get(job)}
     if job == "J19":
@@ -228,7 +252,8 @@ class Service(Base):
             S.posts[scenario] = S.posts.get(scenario, 0) + 1
         if scenario == "strict422":              # a model that forbids extra fields echoes the grant
             return self.send(422, {"detail": [{"type": "extra_forbidden", "loc": ["body", "grant"],
-                                               "msg": "Extra inputs are not permitted", "input": body.get("grant")}]})
+                                               "msg": "Extra inputs are not permitted", "input": body.get("grant")},
+                                              {"type": "also", "input": body.get("grant")}]})
         if scenario == "submit500":
             return self.send(500, {"error": "can't take it"})
         if scenario == "submit503":              # counted on its own: the 5xx-is-not-re-sent check
@@ -273,6 +298,8 @@ class Service(Base):
                 return self.send(404, {"error": "no such job (yet)"})
             d = job_doc(parts[2], n)
             return self.send(200, d) if d is not None else self.send(404, {"error": "no such job"})
+        if self.path.startswith("/jobs/J38/files/"):
+            return self.send(200, raw=b"LEAKY")
         if self.path.startswith("/jobs/J3") and self.path.endswith("/files/f.bin"):
             with S.lock:
                 n = S.gets.get(self.path, 0)
@@ -547,7 +574,7 @@ def main():
     check("markdown pointing anywhere but that file is not printed",
           "elsewhere.example" not in r.stdout and "  lure 103  ![x.png](/api/v1/files/103/raw)" in r.stdout, r.stdout)
     g = minted_since(mark)
-    check("the grant rode in the body, top-level", len(g) == 1 and S.bodies.get("J1", {}).get("grant") == f"sc_grant_{g[0]}",
+    check("the grant rode in the body, top-level", len(g) == 1 and S.bodies.get("J1", {}).get("grant") == grant_secret(g[0]),
           S.bodies.get("J1"))
     posted = [b for m_, p, _a, b in S.plane if m_ == "POST" and p == "/api/v1/grants"]
     check("the grant named the service, the group and the default ttl",
@@ -784,20 +811,34 @@ def main():
     check("'canceled' ends the wait, exit 1", r.returncode == 1 and "job J10: canceled" in r.stdout, r.stdout + r.stderr)
 
     print("sc-job — a grant is never printed")
-    secret = re.compile(r"sc_grant_\d")
     mark = S.next_grant
     r = run(["call", "dev/render", "/render", '{"scenario":"strict422"}', "--store", "projects"], tmp)
     g = minted_since(mark)
-    check("a 422 that echoes the grant prints it redacted, and the grant is revoked (exit 2)",
-          r.returncode == 2 and not secret.search(r.stdout + r.stderr) and "sc_grant_[redacted]" in r.stderr
+    check("a 422 that echoes the grant twice prints both redacted (the error line), and the grant is revoked (exit 2)",
+          r.returncode == 2 and not leaked(r.stdout + r.stderr) and r.stderr.count("sc_grant_[redacted]") == 2
           and g and g[0] in S.revoked, (r.returncode, g, r.stderr))
     r = run(["call", "dev/render", "/render", '{"scenario":"echo"}', "--store", "projects", "--json", "--out", "o-echo"], tmp)
     check("--json of a job that echoes the request prints the grant redacted",
-          r.returncode == 0 and not secret.search(r.stdout + r.stderr)
+          r.returncode == 0 and not leaked(r.stdout + r.stderr)
           and json.loads(r.stdout)["request"]["grant"] == "sc_grant_[redacted]", (r.returncode, r.stdout, r.stderr))
     r = run(["status", "dev/render", "J20"], tmp)
     check("status of that job prints the grant redacted",
-          r.returncode == 0 and not secret.search(r.stdout) and "sc_grant_[redacted]" in r.stdout, r.stdout)
+          r.returncode == 0 and not leaked(r.stdout) and "sc_grant_[redacted]" in r.stdout, r.stdout)
+    r = run(["call", "dev/render", "/render", '{"scenario":"leaky"}', "--store", "projects", "--out", "o-leaky"], tmp)
+    out = r.stdout + r.stderr
+    check("a grant echoed in a progress note is redacted", "checking sc_grant_[redacted]" in r.stderr and not leaked(r.stderr),
+          r.stderr[-400:])
+    check("... in the files line", "sc_grant_[redacted].txt" in r.stdout and not leaked(r.stdout), r.stdout)
+    check("... in plane_error", "plane upload: upload refused for sc_grant_[redacted]" in r.stdout, r.stdout)
+    check("a file named like sc_grant_report-2026.txt prints as it is", "sc_grant_report-2026.txt" in r.stdout
+          and r.returncode == 0, (r.returncode, out[-400:]))
+    r = run(["fetch", "dev/render", "J38", "--out", "o-leaky2"], tmp)
+    check("... and fetch redacts the same", r.returncode == 0 and "sc_grant_[redacted].txt" in r.stdout
+          and "upload refused for sc_grant_[redacted]" in r.stdout and not leaked(r.stdout + r.stderr), r.stdout + r.stderr)
+    r = run(["call", "dev/render", "/render", '{"scenario":"leakyfail"}', "--store", "projects"], tmp)
+    check("a failed job's error that echoes the grant is redacted in the summary (exit 1)",
+          r.returncode == 1 and "· refused grant sc_grant_[redacted]" in r.stdout and not leaked(r.stdout + r.stderr),
+          (r.returncode, r.stdout))
 
     print("sc-job — downloads retried, and stopped")
     for scenario, job, what in (("dropdl", "J30", "no status line (RemoteDisconnected)"),

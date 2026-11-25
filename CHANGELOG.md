@@ -8,6 +8,11 @@ What each release changed.
 - `hold` keeps renewing through a renew with no answer. It used to end on the first connection error, which left the lease to expire during a restart.
 - `queue.md` (skill 3.13.4), from claude-producer's review of 3.13.3: a 401 or 403 on release is the wrong or a rotated identity, so stop and report it rather than retry; keep the TTL well above the one-minute restart; 429s are retried with the rest; `sc-lease release` retries on its own.
 
+## 2026-11-26 — sc-job 1.0.2: review fixes
+
+- **`sc-job` 1.0.2, from claude-producer's review of 1.0.1 (#1447):**
+  - Redaction hides only the grant's own shape, `sc_grant_` and 43 of `[A-Za-z0-9_-]` (the plane mints `sc_grant_` + `token_urlsafe(32)`), so a result named `sc_grant_report-2026.txt` prints as it is.
+
 ## 2026-11-25 — queue.md: make every release land
 
 - `queue.md` (skill 3.13.3), "Build a service": retry a release that gets no answer, a 5xx or a 429 with back-off, keep the id on disk until it's acknowledged, and retry what's pending periodically. A renew failing the same way is retried within the TTL. On a `hold` resource an expired lease keeps its memory until it is released. Two lost releases on 25 Nov held 32 GB of slice's GPU for three hours and 16 GB of Obelisk's (#1145).

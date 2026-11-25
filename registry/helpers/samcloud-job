@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# JOB_VERSION: 1.0.1
+# JOB_VERSION: 1.0.2
 # Served as GET /api/v1/helpers/job. Install from the plane you call from:
 #   curl -s -H @"$HOME/.samcloud/__TOKEN_HDR__" __API__/helpers/job > ~/.local/bin/sc-job && chmod +x ~/.local/bin/sc-job
 """sc-job — call a service on the plane: submit a job, wait for it, keep what it made.
@@ -54,7 +54,7 @@ Where it calls (as sc-say): --plane NAME (a plane the serving plane names) > $SA
 Auth — a 0600 header file, never the bearer on a command line (#582):
   --hdr FILE (must exist) > $SAMCLOUD_AUTH_HDR > ~/.samcloud/token.hdr
 The bearer goes only to the plane and to the service's own https address, and is
-never printed. Nor is a grant: any sc_grant_… in what sc-job prints (a service's
+never printed. Nor is a grant: a grant secret in what sc-job prints (a service's
 error that echoes the request, --json, status) shows as sc_grant_[redacted]. API calls follow a redirect only to the same origin. A download
 may follow an https redirect to another host, without the bearer; a redirect to
 plain http is refused. Python 3 standard library only.
@@ -91,7 +91,9 @@ JOB_ID = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,127}")
 LOOPBACK = ("localhost", "127.0.0.1", "::1")
 ANSI = re.compile(r"\x1b\[[0-?]*[ -/]*[@-~]|\x1b\][^\x07\x1b]*(\x07|\x1b\\)?")
 CONTROL = re.compile(r"[\x00-\x1f\x7f-\x9f]")
-GRANT_SECRET = re.compile(r"sc_grant_[A-Za-z0-9_-]+")     # the plane mints sc_grant_ + token_urlsafe
+# The plane mints "sc_grant_" + secrets.token_urlsafe(32): always 43 of [A-Za-z0-9_-]. Only that shape
+# is hidden, so a file named sc_grant_report-2026.txt prints as it is.
+GRANT_SECRET = re.compile(r"sc_grant_[A-Za-z0-9_-]{43}")
 
 
 def _pair(name, default):
