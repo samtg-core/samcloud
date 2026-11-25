@@ -4,7 +4,7 @@ What each release changed.
 
 ## 2026-11-25 — The caller side of a service, second pass
 
-- `tools.md` (skill 3.23.0), "Find and call a service", from wafer-producer's cold run of scene-render (#1152) set beside claude-wafer's (#1163): a grant's `group_scope` is a plane group from `GET /groups`, not a service's own group; `plane_files` is named, with its shape (an object keyed by role, not a list); polling uses the service's own status words, `queued`, `running`, `done`, `failed`; and a short paragraph on the asset registry: admission, its own groups, what a `404` means, and which asset `fit: splatFrame` can place (#1157).
+- `tools.md` (skill 3.23.0), "Find and call a service", from wafer-producer's cold run of scene-render (#1152) set beside claude-wafer's (#1163): a grant's `group_scope` is a plane group from `GET /groups`, not a service's own group; `plane_files` is named, with its shape (an object keyed by role, not a list); polling uses the service's own status words, `queued`, `running`, `done`, `failed`, `cancelled` (scene-render's `DELETE` on a job); and a short paragraph on the asset registry: admission, its own groups, what a `404` means, and which asset `fit: splatFrame` can place (#1157).
 
 ## 2026-11-24 — gh-broker 0.7.0: agents create repos in their own scope; no token can delete one
 

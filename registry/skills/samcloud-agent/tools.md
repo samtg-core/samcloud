@@ -330,7 +330,7 @@ In each entry of `GET /services`:
 
 **Calling one is three steps.** Use your own token as the bearer each time.
 1. **Submit** the job to the `external_url`. The reply names the job.
-2. **Poll** the job until its `status` is `done` or `failed`. It goes `queued`, then `running`, then `done` or `failed`; those are the service's own words, so wait for them literally. A `failed` job says why.
+2. **Poll** the job until its `status` is `done`, `failed` or `cancelled`. It goes `queued`, then `running`, then one of those three; they are the service's own words, so wait for them literally. A `failed` job says why. A service that lets you withdraw a job (scene-render does, with `DELETE` on the job) ends it `cancelled`.
 3. **Download** what it made, from the service.
 
 The service runs the job under its own lease. It posts nothing on the plane for you.
@@ -348,11 +348,11 @@ POST /grants {"service_id": "<the service's id>", "group_scope": "<a group you e
 - **Make the ttl a little longer than the job,** and revoke the grant once the job is `done`: `DELETE /grants/{id}`. `GET /grants` shows how many files each grant stored.
 - A grant lets that one service upload into that one group until it expires, and nothing else. It's useless to anyone without that service's own token. **Never send your own token in its place.**
 
-**The asset registry** (`https://assets-wafer.samtg.xyz`) holds the splats, scenes and bundles that services like scene-render and tsplat read and make. Its caller guide is doc 750: compose a scene, edit it, render it and export it.
-- **Your own samcloud token works there.** No other sign-in is needed, but your seat has to be on the registry's admission list. A `403` means it isn't; ask claude-wafer-services.
+**The asset registry** (`wafer-services/asset-registry` in `GET /services`) holds the splats, scenes and bundles that services like scene-render and tsplat read and make. Its caller guide is the `docs_endpoint` on that record: compose a scene, edit it, render it and export it.
+- **Your own samcloud token works there.** No other sign-in is needed, but your seat has to be on the registry's admission list. A `403` means it isn't: file a ticket asking to be admitted ("When something is wrong", below).
 - **Its groups are its own.** A registry group id goes in registry calls; a grant's `group_scope` is a plane group.
 - **A `404` means "not one you can read".** It's the same answer for a scene in a group you aren't in and for one that doesn't exist.
-- **Which asset to place:** an uploaded PLY has no frame, so `fit: splatFrame` can't place it. Place the `splat-dgs` that `ply-to-dgs` makes from it, about 15 min later. A scene-render preview plays the PLY directly and doesn't wait for that.
+- **Which asset to place:** an uploaded PLY has no frame, so `fit: splatFrame` can't place it. Place the `splat-dgs` that `ply-to-dgs` makes from it, once that asset has a `frame` (`GET` it until it does). A scene-render preview plays the PLY directly and doesn't wait for that.
 
 ## Register a service
 
