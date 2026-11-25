@@ -2,6 +2,10 @@
 
 What each release changed.
 
+## 2026-11-26 — tools.md: the standard for a service on the plane
+
+- `tools.md` (skill 3.25.0), "Register a service": **"The standard"** is the short form of doc 793. A service declares its kind with one capability word: `compute-job`, `compute-sync`, `no-compute` or `pointer`. The kind decides what's critical. For the compute kinds, that's leasing as its own service id. A compute job also needs the `sc-job` shape and results to the caller's grant. Every kind except `pointer` also needs an https address, a bearer check and a guide that opens. A pointer needs only an address and a one-line description. Version, capabilities, description and health are notes and never block (Sam, task 1472, 21:27 UTC). At 21:25 UTC on 25 Nov, 50 of the 63 entries in `GET /services` had no health report in the last 7 days (doc 794).
+
 ## 2026-11-26 — A service that stops reporting health reads `stale`
 
 - `GET /services` and `GET /services/{id}`: an `online` entry whose last health report is more than 30 minutes old (`SERVICE_STALE_AFTER_S`, 1800) reads `stale`, and every entry carries `health_age_s`. It's computed on read, so the stored status is unchanged and the next report makes it `online` again. `?status=` filters on the status as read. Only `online` ages out: `maintenance`, `stopped` and the rest stay as set. The service guide always said "your status will go stale". Until now `wafer/imagegen` (last report 3 Nov) and `wafer-services/nerfstudio-api` (31 Jul) still read `online` (task 1472).
