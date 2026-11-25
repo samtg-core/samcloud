@@ -7,7 +7,8 @@
     sc-job list                                         services you can see: id, health, address, what it does
     sc-job call <service id> <submit path> [BODY] [--store GROUP] [--ttl S] [--out DIR] [--no-wait] [--json]
                                                         BODY is JSON, @file or - (stdin); default {}
-    sc-job fetch <service id> <job> [--out DIR] [--json]  wait for a job you submitted, then download it
+    sc-job fetch <service id> <job> [--grant ID] [--out DIR] [--json]
+                                                        wait for a job you submitted, download it, revoke --grant
     sc-job status <service id> <job>                    the job as the service reports it (raw JSON)
     sc-job cancel <service id> <job>                    withdraw a queued job, or delete a finished one
                                                         (fetch, status and cancel take --poll PATH if not /jobs/<job>)
@@ -22,15 +23,19 @@ and prints the files, the plane files you now own by role, and a line to embed
 the first image.
 
 The job ends `done`, or as a failure: `failed`, `cancelled` (or `canceled`),
-`error` or `expired`. Any other status is waited out; an unfamiliar one is
-named once on stderr.
+`error` or `expired`. `queued` and `running` are waited out. Any other status,
+or none, is named once on stderr; after 20 such polls in a row, or 5 polls in a
+row that answer an error or no JSON, sc-job stops waiting (exit 2) and leaves
+the job and its grant alone, printing how to resume.
 
 --store GROUP mints a grant for that service and that plane group (one you
 edit, from `GET /groups`), adds it to BODY as "grant", and revokes it when the
 job ends. --ttl is the grant's life (default 7200 s). With --no-wait, or if you
 stop waiting with Ctrl-C, the job carries on and the grant stays live until its
-ttl so the uploads still land; sc-job prints how to resume (`sc-job fetch`) and
-how to revoke. If a revoke fails it says so, prints the command, and carries on.
+ttl so the uploads still land; sc-job prints the `sc-job fetch … --grant ID`
+line that resumes, downloads and then revokes it. SIGTERM or SIGHUP revokes the
+grant (the job's uploads will then fail) and prints the fetch line. If a revoke
+fails it says so, prints the command, and carries on.
 
 What a service has to answer (tools.md, "Register a service"): the submit reply
 names `job` (and may name `poll`, else /jobs/<job>); the poll answers `status`,
@@ -68,14 +73,15 @@ PROG = "sc-job"
 OK = ("done",)
 FAILED = ("failed", "cancelled", "canceled", "error", "expired")
 WAITING = ("queued", "running")
-UNKNOWN_WARN_AFTER = 3
+UNKNOWN_WARN_AFTER = 3     # polls with an unfamiliar status before it is named
+UNKNOWN_LIMIT = 20         # ... and before sc-job stops waiting
+POLL_BAD_LIMIT = 5         # polls in a row answering an error or no JSON
 try:
     _PLANES = json.loads('__PLANES_JSON__')
 except ValueError:          # an unrendered copy, run from a checkout
     _PLANES = {}
 _SERVED_API = "__API__"
 JOB_ID = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,127}")
-REL_FILE = re.compile(r"[A-Za-z0-9_][A-Za-z0-9._-]*(/[A-Za-z0-9_][A-Za-z0-9._-]*)*")
 LOOPBACK = ("localhost", "127.0.0.1", "::1")
 ANSI = re.compile(r"\x1b\[[0-?]*[ -/]*[@-~]|\x1b\][^\x07\x1b]*(\x07|\x1b\\)?")
 CONTROL = re.compile(r"[\x00-\x1f\x7f-\x9f]")
@@ -92,6 +98,9 @@ def _pair(name, default):
 # Seconds: poll back-off (start, ceiling) and retry back-off (start, ceiling). Tunable for tests.
 POLL_MIN, POLL_MAX = _pair("SC_JOB_POLL_S", "5,15")
 RETRY_MIN, RETRY_MAX = _pair("SC_JOB_RETRY_S", "2,60")
+_UMASK = os.umask(0)
+os.umask(_UMASK)
+FILE_MODE = 0o666 & ~_UMASK          # what a downloaded file gets: the umask's, not mkstemp's 0600
 
 
 class CallError(Exception):
@@ -100,6 +109,18 @@ class CallError(Exception):
 
 class RedirectRefused(Exception):
     pass
+
+
+class PollLost(Exception):
+    """Polling can't tell what the job is doing; the job may still be running."""
+
+
+class Stopped(SystemExit):
+    """SIGTERM or SIGHUP: unwind through every finally, exit 2."""
+
+    def __init__(self, signame):
+        super().__init__(2)
+        self.signame = signame
 
 
 def clean(value, limit=300):
@@ -209,7 +230,7 @@ class Client:
 
     def revoke_hint(self, grant_id):
         return (f"curl -s -H @{shlex.quote(self.hdr_path or os.path.expanduser('~/.samcloud/token.hdr'))} "
-                f"-X DELETE {self.api}/grants/{grant_id}")
+                f"-X DELETE {shlex.quote(f'{self.api}/grants/{grant_id}')}")
 
     def call(self, method, url, body=None, *, tries=5, stream_to=None, what=None):
         """One call. tries=None retries for ever (polling); a POST is retried only when the
@@ -266,14 +287,24 @@ class Client:
     @staticmethod
     def _stream(r, dest):
         """Write the body to a temp file beside dest, then put it in place."""
+        try:
+            expected = int(r.headers.get("Content-Length"))
+        except (TypeError, ValueError):
+            expected = None
         fd, tmp = tempfile.mkstemp(dir=dest.parent, prefix=".sc-job-")
         try:
+            got = 0
             with os.fdopen(fd, "wb") as f:
                 while True:
                     chunk = r.read(1 << 16)
                     if not chunk:
                         break
                     f.write(chunk)
+                    got += len(chunk)
+            # http.client returns short at EOF without raising: count against what was promised.
+            if expected is not None and got < expected:
+                raise http.client.IncompleteRead(b"", expected - got)
+            os.chmod(tmp, FILE_MODE)
             os.replace(tmp, dest)
         except BaseException:
             try:
@@ -338,11 +369,24 @@ def result_files(j, base, poll):
         if not s.startswith(prefix):
             continue
         rel = urllib.parse.unquote(s[len(prefix):])
-        if not REL_FILE.fullmatch(rel) or ".." in rel.split("/"):
+        if not rel_ok(rel):
             die(f"refusing a file path outside the job's files: {clean(s, 120)!r}")
         if rel not in out:
             out.append(rel)
     return out
+
+
+def rel_ok(rel):
+    """Segments of printable text (so no NUL or other control character), none empty, `.` or
+    `..`, none with a backslash. Spaces and non-ASCII letters are fine."""
+    for seg in rel.split("/"):
+        if not seg or seg in (".", ".."):
+            return False
+        if "\\" in seg:
+            return False
+        if not seg.isprintable():
+            return False
+    return True
 
 
 def targets(rels, out):
@@ -379,9 +423,21 @@ def flatten(value, role=""):
 
 
 def wait(c, base, poll, job):
-    last, delay, odd = None, POLL_MIN, 0
+    last, delay, odd, bad, warned = None, POLL_MIN, 0, 0, False
     while True:
-        j = c.call("GET", base + poll, tries=None, what=f"polling job {job}")
+        try:
+            j = c.call("GET", base + poll, tries=None, what=f"polling job {job}")
+            if not isinstance(j, dict):
+                raise CallError(f"polling job {job} did not answer a JSON object")
+        except CallError as e:
+            bad += 1
+            if bad >= POLL_BAD_LIMIT:
+                raise PollLost(f"{e} ({bad} polls in a row)")
+            if bad == 1:
+                note(f"{PROG}: {e}; trying again")
+            time.sleep(min(RETRY_MAX, RETRY_MIN * 2 ** (bad - 1)))
+            continue
+        bad = 0
         status = j.get("status")
         now = (status, j.get("stage"), position(j))
         if now != last:
@@ -391,11 +447,17 @@ def wait(c, base, poll, job):
             delay = min(POLL_MAX, delay + POLL_MIN)
         if status in OK + FAILED:
             return j
-        if status not in WAITING:
+        if status in WAITING:
+            odd = 0
+        else:
             odd += 1
-            if odd == UNKNOWN_WARN_AFTER:
+            if odd >= UNKNOWN_WARN_AFTER and not warned:
+                warned = True
                 note(f"{PROG}: job {job} reports status {clean(status, 40)!r}, which sc-job doesn't know; "
                      f"still waiting for done, or one of {', '.join(FAILED)}")
+            if odd >= UNKNOWN_LIMIT:
+                raise PollLost(f"job {job} has reported no status sc-job knows for {odd} polls "
+                               f"(last: {clean(status, 40)!r})")
         time.sleep(delay)
 
 
@@ -468,18 +530,51 @@ def read_body(arg):
         die(f"BODY is not JSON: {e}")
 
 
+QUIET = tuple(getattr(signal, n) for n in ("SIGTERM", "SIGHUP", "SIGINT") if hasattr(signal, n))
+
+
 def revoke(c, grant):
-    """Best effort: a failed revoke is reported with the command, and the job's results still come back."""
+    """Best effort, and not interruptible: further signals are ignored while it runs. A failed
+    revoke is reported with the command, and the job's results still come back."""
+    gid = grant["id"]
+    saved = {s: signal.getsignal(s) for s in QUIET}
+    for s in QUIET:
+        signal.signal(s, signal.SIG_IGN)
     try:
-        c.call("DELETE", f"{c.api}/grants/{grant['id']}", tries=3, what=f"revoking grant {grant['id']}")
+        c.call("DELETE", f"{c.api}/grants/{urllib.parse.quote(str(gid), safe='')}", tries=3,
+               what=f"revoking grant {clean(gid, 40)}")
     except CallError as e:
-        note(f"{PROG}: could not revoke grant {grant['id']} ({e}). It expires at "
-             f"{clean(grant.get('expires_at'), 40)}; to revoke it now:\n  {c.revoke_hint(grant['id'])}")
+        note(f"{PROG}: could not revoke grant {clean(gid, 40)} ({e}). It expires at "
+             f"{clean(grant.get('expires_at'), 40)}; to revoke it now:\n  {c.revoke_hint(gid)}")
+    finally:
+        for s, h in saved.items():
+            signal.signal(s, h)
 
 
-def fetch_hint(a, job, poll):
+def fetch_hint(a, job, poll, grant=None):
     extra = f" --poll {shlex.quote(poll)}" if poll != f"/jobs/{job}" else ""
+    if grant:
+        extra += f" --grant {shlex.quote(str(grant['id']))}"
     return f"sc-job fetch {shlex.quote(a.service)} {job}{extra}"
+
+
+def kept_note(c, a, job, poll, grant, why):
+    note(f"\n{PROG}: {why}. Job {job} carries on at the service.")
+    if grant:
+        note(f"  grant {clean(grant['id'], 40)} stays live until {clean(grant.get('expires_at'), 40)}, "
+             f"so its uploads still land.")
+    note(f"  resume:  {fetch_hint(a, job, poll, grant)}" + ("   (downloads, then revokes the grant)" if grant else ""))
+    if grant:
+        note(f"  or revoke it now:  {c.revoke_hint(grant['id'])}")
+
+
+def stopped_note(c, a, job, poll, grant, e):
+    """SIGTERM or SIGHUP while waiting: the grant is revoked (signals ignored meanwhile), then the hint."""
+    note(f"\n{PROG}: stopped by {e.signame}. Job {job} carries on at the service.")
+    if grant:
+        note(f"  revoking grant {clean(grant['id'], 40)}: the job's uploads to the plane will fail.")
+        revoke(c, grant)
+    note(f"  resume:  {fetch_hint(a, job, poll)}")
 
 
 def cmd_call(c, a):
@@ -503,21 +598,24 @@ def cmd_call(c, a):
             print(job)
             if grant:
                 keep = True
-                note(f"grant {grant['id']} stays live until {clean(grant.get('expires_at'), 40)}; "
-                     f"once the job is done:\n  {fetch_hint(a, job, poll)}\n  {c.revoke_hint(grant['id'])}")
+                note(f"grant {clean(grant['id'], 40)} stays live until {clean(grant.get('expires_at'), 40)}; "
+                     f"to wait, download and revoke it:\n  {fetch_hint(a, job, poll, grant)}\n"
+                     f"or revoke it now:\n  {c.revoke_hint(grant['id'])}")
             return 0
         try:
             j = wait(c, base, poll, job)
         except KeyboardInterrupt:
-            note(f"\n{PROG}: stopped waiting. Job {job} carries on at the service.")
-            if grant:
-                keep = True
-                note(f"  grant {grant['id']} stays live until {clean(grant.get('expires_at'), 40)}, "
-                     f"so its uploads still land.")
-            note(f"  resume:  {fetch_hint(a, job, poll)}")
-            if grant:
-                note(f"  revoke once it's done:  {c.revoke_hint(grant['id'])}")
+            keep = True
+            kept_note(c, a, job, poll, grant, "stopped waiting")
             return 2
+        except PollLost as e:
+            keep = True
+            kept_note(c, a, job, poll, grant, f"stopped waiting: {e}; nothing was revoked")
+            return 2
+        except Stopped as e:
+            keep = True                    # stopped_note revokes it, with signals ignored
+            stopped_note(c, a, job, poll, grant, e)
+            raise
     finally:
         if grant and not keep:
             revoke(c, grant)
@@ -528,12 +626,27 @@ def cmd_fetch(c, a):
     base = service_base(c, a.service)
     job = job_id(a.job)
     poll = safe_path(a.poll, "poll path") if a.poll else f"/jobs/{job}"
+    grant = {"id": a.grant, "expires_at": "its ttl"} if a.grant is not None else None
+    keep = False
     try:
-        j = wait(c, base, poll, job)
-    except KeyboardInterrupt:
-        note(f"\n{PROG}: stopped waiting. Job {job} carries on; resume:  {fetch_hint(a, job, poll)}")
-        return 2
-    return finish(c, a, base, poll, job, j)
+        try:
+            j = wait(c, base, poll, job)
+        except KeyboardInterrupt:
+            keep = True
+            kept_note(c, a, job, poll, grant, "stopped waiting")
+            return 2
+        except PollLost as e:
+            keep = True
+            kept_note(c, a, job, poll, grant, f"stopped waiting: {e}; nothing was revoked")
+            return 2
+        except Stopped as e:
+            keep = True
+            stopped_note(c, a, job, poll, grant, e)
+            raise
+        return finish(c, a, base, poll, job, j)
+    finally:
+        if grant and not keep:
+            revoke(c, grant)
 
 
 def cmd_list(c, a):
@@ -548,13 +661,18 @@ def cmd_list(c, a):
 
 
 def _stop(signum, _frame):
-    raise SystemExit(2)
+    raise Stopped(signal.Signals(signum).name)
+
+
+def install_signals():
+    signal.signal(signal.SIGTERM, _stop)
+    # Under nohup SIGHUP is ignored on purpose: leave it that way.
+    if hasattr(signal, "SIGHUP") and signal.getsignal(signal.SIGHUP) != signal.SIG_IGN:
+        signal.signal(signal.SIGHUP, _stop)
 
 
 def main():
-    signal.signal(signal.SIGTERM, _stop)
-    if hasattr(signal, "SIGHUP"):
-        signal.signal(signal.SIGHUP, _stop)
+    install_signals()
     ap = argparse.ArgumentParser(prog=PROG, description=__doc__.split("\n\n")[0],
                                  epilog="Exit: 0 done; 1 failed/cancelled/expired; 2 usage, HTTP or interrupted.",
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
@@ -580,6 +698,7 @@ def main():
     f.add_argument("service")
     f.add_argument("job")
     f.add_argument("--poll", help="the job's path, if not /jobs/<job>")
+    f.add_argument("--grant", type=int, metavar="ID", help="revoke this grant once the results are in")
     f.add_argument("--out", help="download into this folder (default ./<job>)")
     f.add_argument("--json", action="store_true", help="print the final job as JSON instead of a summary")
     a = ap.parse_args()

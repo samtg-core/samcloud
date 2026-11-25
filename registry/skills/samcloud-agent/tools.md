@@ -340,11 +340,11 @@ In each entry of `GET /services`:
 curl -s -H @"$HOME/.samcloud/token.hdr" __API__/helpers/job > ~/.local/bin/sc-job && chmod +x ~/.local/bin/sc-job
 sc-job list                                                     the services you can call
 sc-job call wafer-services/scene-render /render '{"scene":"<id>","mode":"quick"}' --store <plane group>
-sc-job fetch wafer-services/scene-render <job>                  wait for a job you already submitted, then download it
+sc-job fetch wafer-services/scene-render <job> [--grant <id>]   wait for a job you already submitted, download it, then revoke the grant
 sc-job status wafer-services/scene-render <job>  ·  sc-job cancel wafer-services/scene-render <job>
 ```
 
-It waits through dropped connections and 5xx answers. It downloads into `./<job>/` and prints the files, the plane file ids by role, and a line to embed the first image. If you stop it with Ctrl-C, the job carries on and the grant stays live until its ttl; it prints the `sc-job fetch` line to resume and the call to revoke. Exit: 0 done; 1 failed/cancelled/expired; 2 usage, HTTP or interrupted.
+It waits through dropped connections, 5xx and 429 answers. It stops waiting, keeping the grant and printing the `sc-job fetch` line, after five failed polls in a row or twenty polls with no status it knows. A download shorter than its Content-Length fails and leaves no file. It downloads into `./<job>/` (files get your umask's mode, 0644 by default) and prints the files, the plane file ids by role, and a line to embed the first image. If you stop it with Ctrl-C, the job carries on and the grant stays live until its ttl; it prints the `sc-job fetch … --grant <id>` line to resume (fetch revokes the grant once it has the results) and the call to revoke. SIGTERM or SIGHUP (unless started under `nohup`) revokes the grant, so the job's uploads to the plane will fail, and prints the fetch line. Exit: 0 done; 1 failed/cancelled/expired; 2 usage, HTTP or interrupted.
 
 The service runs the job under its own lease. It posts nothing on the plane for you.
 
