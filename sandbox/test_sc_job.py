@@ -411,7 +411,10 @@ def unit(m, tmp):
 def main():
     global HDR
     os.umask(0o022)
-    signal.signal(signal.SIGHUP, signal.SIG_DFL)   # the helpers we start must not inherit an ignored SIGHUP (nohup)
+    # The helpers we start must not inherit an ignored SIGHUP (nohup) or SIGINT (`&` in a
+    # non-interactive shell): the signal checks below would hang or crash.
+    signal.signal(signal.SIGHUP, signal.SIG_DFL)
+    signal.signal(signal.SIGINT, signal.default_int_handler)
     tmp = tempfile.mkdtemp(prefix="sc-job-")
     HDR = os.path.join(tmp, "token.hdr")
     Path(HDR).write_text(f"Authorization: {TOKEN}\n")
