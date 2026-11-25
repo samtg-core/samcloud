@@ -24,10 +24,12 @@ the markdown that embeds it. Those are already your files on the plane; paste
 the markdown, don't upload the downloads again.
 
 The job ends `done`, or as a failure: `failed`, `cancelled` (or `canceled`),
-`error` or `expired`. `queued` and `running` are waited out. Any other status,
-or none, is named once on stderr; after 20 such polls in a row, or 5 polls in a
-row that answer an error or no JSON, sc-job stops waiting (exit 2) and leaves
-the job and its grant alone, printing how to resume.
+`error` or `expired`. `queued` and `running` are waited out. Any other status
+is named once on stderr and waited out for as long as the answer changes (its
+status, stage, progress or position). After 20 polls in a row with the same such
+answer, or with no status at all, or 5 polls in a row that answer an error or no
+JSON, sc-job stops waiting (exit 2) and leaves the job and its grant alone,
+printing how to resume.
 
 --store GROUP mints a grant for that service and that plane group (one you
 edit, from `GET /groups`), adds it to BODY as "grant", and revokes it when the
@@ -76,7 +78,7 @@ OK = ("done",)
 FAILED = ("failed", "cancelled", "canceled", "error", "expired")
 WAITING = ("queued", "running")
 UNKNOWN_WARN_AFTER = 3     # polls with an unfamiliar status before it is named
-UNKNOWN_LIMIT = 20         # ... and before sc-job stops waiting
+UNKNOWN_LIMIT = 20         # polls in a row with no status, or an unfamiliar one that doesn't change
 POLL_BAD_LIMIT = 5         # polls in a row answering an error or no JSON
 EMBED_LIMIT = 24           # plane files whose record sc-job reads for their markdown
 try:
@@ -441,7 +443,8 @@ def flatten(value, role=""):
 
 
 def wait(c, base, poll, job):
-    last, delay, odd, bad, warned = None, POLL_MIN, 0, 0, False
+    last, delay, bad = None, POLL_MIN, 0
+    answer, stale, odd, warned = None, 0, 0, False
     while True:
         try:
             j = c.call("GET", base + poll, tries=None, what=f"polling job {job}")
@@ -465,17 +468,21 @@ def wait(c, base, poll, job):
             delay = min(POLL_MAX, delay + POLL_MIN)
         if status in OK + FAILED:
             return j
+        seen = now + (json.dumps(j.get("progress"), sort_keys=True, default=str),)
         if status in WAITING:
-            odd = 0
+            stale = odd = 0
         else:
             odd += 1
             if odd >= UNKNOWN_WARN_AFTER and not warned:
                 warned = True
                 note(f"{PROG}: job {job} reports status {clean(status, 40)!r}, which sc-job doesn't know; "
                      f"still waiting for done, or one of {', '.join(FAILED)}")
-            if odd >= UNKNOWN_LIMIT:
-                raise PollLost(f"job {job} has reported no status sc-job knows for {odd} polls "
-                               f"(last: {clean(status, 40)!r})")
+            # A changing answer is progress, however the service names it; no status never is.
+            stale = stale + 1 if status is None or seen == answer else 1
+            if stale >= UNKNOWN_LIMIT:
+                raise PollLost(f"job {job} has answered " + ("no status" if status is None else
+                               f"status {clean(status, 40)!r}, unchanged,") + f" for {stale} polls")
+        answer = seen
         time.sleep(delay)
 
 

@@ -135,7 +135,7 @@ class Plane(Base):
 SCENARIOS = {"ok": "J1", "fail": "J2", "escape": "J3", "redirect": "J4", "cancel": "J5", "link": "J6",
              "blips": "J7", "slow": "J8", "odd": "J9", "canceled": "J10", "flaky": "J11", "apiredir": "J13",
              "rate": "J14", "truncated": "J15", "lost404": "J16", "lost": "J17", "nostatus": "J18", "unicode": "J19",
-             "echo": "J20"}
+             "echo": "J20", "busy": "J21", "stuck": "J22", "longrun": "J23", "blank": "J24", "error": "J25"}
 REPLIES = {"badjob": {"job": "x/evil1"}, "badpoll": {"job": "J12", "poll": "/jobs/../evilpoll"}}
 FILES = {"/jobs/J1/files/sheet.png": b"PNGDATA", "/jobs/J1/files/stills/a-01.jpg": b"JPGDATA",
          "/jobs/J6/files/link/x.txt": b"LINKED", "/jobs/J7/files/out.txt": b"AFTERBLIPS",
@@ -178,6 +178,17 @@ def job_doc(job, n):
         return {"job": job, "status": "done", "results": []}
     if job == "J18":
         return {"job": job}
+    if job in ("J21", "J26"):                     # a status sc-job doesn't know, but moving
+        return {"job": job, "status": "processing", "stage": f"frame {n}"} if n < 30 else \
+               {"job": job, "status": "done", "results": []}
+    if job == "J22":                              # the same unfamiliar answer, for ever
+        return {"job": job, "status": "processing", "stage": "frames"}
+    if job == "J23":                              # running, unchanged, for longer than the cap
+        return {"job": job, "status": "running"} if n < 30 else {"job": job, "status": "done", "results": []}
+    if job == "J24":                              # no status, though something changes
+        return {"job": job, "stage": f"frame {n}"}
+    if job == "J25":
+        return {"job": job, "status": "error", "error": "out of memory"}
     if job == "J20":                              # echoes the request it was given, grant and all
         return {"job": job, "status": "done", "results": [], "request": S.bodies.get(job)}
     if job == "J19":
@@ -587,6 +598,27 @@ def main():
     check("a job with no status stops the wait after 20 polls (exit 2), keeping the grant",
           r.returncode == 2 and g and g[0] not in S.revoked and f"sc-job fetch dev/render J18 --grant {g[0]}" in r.stderr
           and S.polls.get("J18") == 20, (r.returncode, g, S.polls.get("J18"), r.stderr[-300:]))
+    r = run(["call", "dev/render", "/render", '{"scenario":"busy"}'], tmp)
+    check("an unfamiliar status whose stage keeps changing is waited out past 20 polls (exit 0)",
+          r.returncode == 0 and "job J21: done" in r.stdout and S.polls.get("J21", 0) > 20,
+          (r.returncode, S.polls.get("J21"), r.stderr[-300:]))
+    r = run(["fetch", "dev/render", "J26"], tmp)
+    check("... and so is it by fetch", r.returncode == 0 and "job J26: done" in r.stdout and S.polls.get("J26", 0) > 20,
+          (r.returncode, S.polls.get("J26"), r.stderr[-300:]))
+    r = run(["call", "dev/render", "/render", '{"scenario":"stuck"}'], tmp)
+    check("an unfamiliar status that doesn't change stops the wait after 20 polls (exit 2)",
+          r.returncode == 2 and S.polls.get("J22") == 20 and "sc-job fetch dev/render J22" in r.stderr,
+          (r.returncode, S.polls.get("J22"), r.stderr[-300:]))
+    r = run(["call", "dev/render", "/render", '{"scenario":"longrun"}'], tmp)
+    check("'running', unchanged for 30 polls, is waited out (exit 0)",
+          r.returncode == 0 and "job J23: done" in r.stdout, (r.returncode, S.polls.get("J23"), r.stderr[-300:]))
+    r = run(["call", "dev/render", "/render", '{"scenario":"blank"}'], tmp)
+    check("no status stops the wait after 20 polls even while the stage changes (exit 2)",
+          r.returncode == 2 and S.polls.get("J24") == 20, (r.returncode, S.polls.get("J24"), r.stderr[-300:]))
+    r = run(["call", "dev/render", "/render", '{"scenario":"error"}'], tmp)
+    check("'error' ends the wait at once, exit 1, with the error",
+          r.returncode == 1 and S.polls.get("J25") == 1 and "job J25: error · out of memory" in r.stdout,
+          (r.returncode, S.polls.get("J25"), r.stdout + r.stderr[-300:]))
     r = run(["call", "dev/render", "/render", '{"scenario":"odd"}'], tmp)
     check("an unknown status is named once, then expired exits 1",
           r.returncode == 1 and r.stderr.count("doesn't know") == 1 and "job J9: expired" in r.stdout, r.stdout + r.stderr)
