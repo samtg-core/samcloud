@@ -164,7 +164,7 @@ SCENARIOS = {"ok": "J1", "fail": "J2", "escape": "J3", "redirect": "J4", "cancel
              "blips": "J7", "slow": "J8", "odd": "J9", "canceled": "J10", "flaky": "J11", "apiredir": "J13",
              "rate": "J14", "truncated": "J15", "lost404": "J16", "lost": "J17", "nostatus": "J18", "unicode": "J19",
              "echo": "J20", "leaky": "J38", "leakyfail": "J39", "embeds": "J40", "many": "J41",
-             "percent": "J42", "flap": "J43", "heartbeat": "J44", "queue": "J45", "busy": "J21", "stuck": "J22", "longrun": "J23", "blank": "J24", "error": "J25",
+             "percent": "J42", "flap": "J43", "heartbeat": "J44", "queue": "J45", "gaps": "J46", "busy": "J21", "stuck": "J22", "longrun": "J23", "blank": "J24", "error": "J25",
              "big": "J27", "chunked": "J28", "shortbig": "J29", "dropdl": "J30", "truncdl": "J31",
              "resetdl": "J32", "slowdl": "J33", "patchy": "J34", "mixed": "J35", "list": "J36",
              "inching": "J37"}
@@ -238,6 +238,10 @@ def job_doc(job, n):
         return {"job": job, "stage": f"frame {n}"}
     if job == "J25":
         return {"job": job, "status": "error", "error": "out of memory"}
+    if job == "J46":                              # 15 with no status, a running, 15 more: never 20 in a row
+        if n == 15:
+            return {"job": job, "status": "running"}
+        return {"job": job} if n < 31 else {"job": job, "status": "done", "results": []}
     if job == "J42":                              # moving only in a field the wait never names
         return {"job": job, "status": "processing", "stage": "frames", "percent": n} if n < 30 else \
                {"job": job, "status": "done", "results": []}
@@ -800,11 +804,16 @@ def main():
     r = run(["call", "dev/render", "/render", '{"scenario":"lost404"}', "--out", "o-l404"], tmp)
     check("two 404s while polling don't end the wait", r.returncode == 0 and "job J16: done" in r.stdout, r.stdout + r.stderr)
     mark = S.next_grant
+    before = S.polls.get("J17", 0)
     r = run(["call", "dev/render", "/render", '{"scenario":"lost"}', "--store", "projects"], tmp)
     g = minted_since(mark)
     check("a job that keeps answering 404 stops the wait (exit 2), keeps the grant and prints the fetch line",
           r.returncode == 2 and g and g[0] not in S.revoked and f"sc-job fetch dev/render J17 --grant {g[0]}" in r.stderr,
           (r.returncode, g, r.stderr))
+    check("... after exactly 5 failed polls", S.polls.get("J17", 0) - before == 5, S.polls.get("J17", 0) - before)
+    r = run(["call", "dev/render", "/render", '{"scenario":"gaps"}'], tmp)
+    check("a 'running' between two runs of 15 polls with no status resets the count: waited out (exit 0)",
+          r.returncode == 0 and "job J46: done" in r.stdout, (r.returncode, S.polls.get("J46"), r.stderr[-300:]))
     r = run(["fetch", "dev/render", "J17", "--grant", "902"], tmp)
     check("fetch --grant on a job that keeps answering 404 stops (exit 2) and keeps that grant",
           r.returncode == 2 and 902 not in S.revoked and "sc-job fetch dev/render J17 --grant 902" in r.stderr,
