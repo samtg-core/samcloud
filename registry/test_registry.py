@@ -7837,3 +7837,62 @@ class TestAccessKeyPairLink:
         assert r.status_code == 200, r.text
         assert r.json()["pair_link_url"].endswith("/api/v1/access-keys/pair")
         assert any("/api/v1/access-keys/pair" in s for s in r.json()["next_steps"])
+
+
+# ===========================================================================
+# Service domain: callers send their bearer to external_url (#1157)
+# ===========================================================================
+
+class TestServiceDomain:
+    def test_a_device_manager_publishes_only_under_the_planes_domain(self, client, tmp_db):
+        """external_url is built from the domain, and callers send their token
+        there. A device manager can't point it at a host the plane doesn't run."""
+        app = _get_app()
+        _register_device(client, "dom-host", "dom-host")
+        with TestClient(app) as raw:
+            token, _ = _invite_and_activate(client, raw, "dom-agent", ["device:dom-host"])
+            mgr = AuthedClient(raw, token)
+            r = mgr.post("/api/v1/services", json={
+                "name": "elsewhere", "device_id": "dom-host", "port": 8101, "description": "t",
+                "subdomain": "elsewhere", "domain": "attacker.example"})
+            assert r.status_code == 403, r.text
+            assert "admin" in r.json()["detail"]
+            r = mgr.post("/api/v1/services", json={
+                "name": "here", "device_id": "dom-host", "port": 8102, "description": "t"})
+            assert r.status_code in (200, 201), r.text
+            r = mgr.post("/api/v1/routes", json={
+                "subdomain": "here-elsewhere", "domain": "attacker.example",
+                "target": "localhost:8102", "service_id": "dom-host/here"})
+            assert r.status_code == 403, r.text
+
+    def test_a_device_token_registers_only_under_the_planes_domain(self, client):
+        import enrollment
+        with patch.object(port_alloc, "_port_in_use", return_value=False):
+            _register_device(client, "tok-host", "tok-host")
+            tok = enrollment.generate_device_token("tok-host")
+            h = {"Authorization": f"Bearer {tok}"}
+            r = client.post("/api/v1/services/register", headers=h, json={
+                "name": "away", "port": 9101, "subdomain": "away-tok", "domain": "attacker.example"})
+            assert r.status_code == 403, r.text
+            r = client.post("/api/v1/services/register", headers=h, json={"name": "home", "port": 9102})
+            assert r.status_code == 200, r.text
+
+    def test_the_planes_domain_matches_loosely_and_the_admin_may_name_another(self, monkeypatch):
+        import main
+        from fastapi import HTTPException
+
+        class Auth:
+            def __init__(self, admin):
+                self.admin = admin
+
+            def is_admin(self):
+                return self.admin
+
+        monkeypatch.setenv("SAMCLOUD_DOMAIN", "samtg.xyz")
+        for same in ("samtg.xyz", "SAMTG.xyz.", " samtg.xyz"):
+            main._require_service_domain(Auth(False), same)
+        for other in ("attacker.example", "samtg.xyz.attacker.example", "xsamtg.xyz", ""):
+            with pytest.raises(HTTPException) as e:
+                main._require_service_domain(Auth(False), other)
+            assert e.value.status_code == 403
+        main._require_service_domain(Auth(True), "attacker.example")

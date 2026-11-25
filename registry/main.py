@@ -2563,6 +2563,19 @@ def delete_service(service_id: str, auth: AuthContext = Depends(get_auth)):
             "route": {"caddy": caddy_status, "dns": dns_status}}
 
 
+def _require_service_domain(auth: AuthContext, domain: str) -> None:
+    """A service or route is published under this plane's own service domain.
+
+    Callers send their bearer to a service's external_url (sc-job, the skill's
+    curl recipe), and external_url is built from this domain. A device manager
+    naming another domain would point every caller's token at a host the plane
+    doesn't control. Another domain is the admin's call (#1157, #43 review).
+    """
+    if (domain or "").strip().rstrip(".").lower() != _service_domain().lower() and not auth.is_admin():
+        raise HTTPException(403, f"Services are routed under {_service_domain()}; "
+                                 "another domain is the admin's to set")
+
+
 @app.post("/api/v1/services")
 def register_service(req: ServiceRegister, auth: AuthContext = Depends(get_auth)):
     """Register a service. Requires admin or device scope."""
@@ -2577,6 +2590,7 @@ def register_service(req: ServiceRegister, auth: AuthContext = Depends(get_auth)
 
     # The device must exist, be visible, and be the caller's to manage
     device = _require_managed_device(auth, req.device_id)
+    _require_service_domain(auth, req.domain)
 
     # Check subdomain uniqueness
     if req.subdomain:
@@ -2794,6 +2808,7 @@ def create_route(req: RouteCreate, auth: AuthContext = Depends(get_auth)):
             raise HTTPException(403, f"You can read {req.service_id} but not manage its device")
     elif not auth.is_admin():
         raise HTTPException(403, "A route with no service is the admin's to create")
+    _require_service_domain(auth, req.domain)
     existing = db.query_one(
         "SELECT * FROM routes WHERE subdomain = ? AND domain = ?",
         (req.subdomain, req.domain),
@@ -7109,6 +7124,9 @@ def register_service_authenticated(
     scopes = json.loads(token_record.get("scopes") or "[]")
     if "service:register" not in scopes and "*" not in scopes:
         raise HTTPException(403, "Token does not have service:register scope")
+    if (req.domain or "").strip().rstrip(".").lower() != _service_domain().lower():
+        raise HTTPException(403, f"Services are routed under {_service_domain()}; "
+                                 "another domain is the admin's to set")
 
     # Verify device exists
     device = db.query_one("SELECT * FROM devices WHERE id = ?", (device_id,))
