@@ -1,4 +1,4 @@
-<!-- SKILL_VERSION: 3.13.3 -->
+<!-- SKILL_VERSION: 3.13.4 -->
 # queue — get compute by asking for it and waiting
 
 Every machine on samcloud registers its compute — a GPU, its memory — as a **resource**. Each resource has one **queue**. You ask for what your job really needs, you wait your turn with no deadline, you run, and you give it back. Local models, renders, splat jobs and tools all take their turn in the same queue.
@@ -35,7 +35,7 @@ sc-lease release "$id" --after-pids "$!"         give it back once its processes
 
 `--wait` with no number waits with no deadline. `sc-lease` is served at `GET /api/v1/helpers/lease`; `tools.md` has the install line and the raw calls.
 
-Release on every path out of the job: success, failure and crash. If you find a lease of yours still held after a crash, release it: `sc-lease release <id>`. A release can meet the plane mid-restart; "Build a service" below says how to make it land.
+Release on every path out of the job: success, failure and crash. If you find a lease of yours still held after a crash, release it: `sc-lease release <id>`. A release can meet the plane mid-restart. `sc-lease release` (1.3.0) retries no answer, a 5xx and a 429 with back-off for five minutes (`--retry S`). Exit 5 means it was not released: keep the id and run it again. "Build a service" below says how a service makes it land.
 
 ## Build a service: give the queue a healthy consumer
 
@@ -44,12 +44,14 @@ A service you build takes leases on behalf of its callers, so it answers for the
 - Take a lease only for real work, sized to that work.
 - Release or withdraw the lease on every failure: the wait, the load, the run.
 - Release what you hold when the service shuts down.
-- **Make every release land.** Each merge restarts the plane for about a minute. A release in that minute gets no answer or a 5xx:
-  - retry it with back-off for a few minutes;
+- **Make every release land.** Each merge restarts the plane for about a minute. A release in that minute gets no answer, a 5xx or a 429:
+  - retry those with back-off for a few minutes;
   - keep the lease id on disk until a 2xx, or a 404 saying `Lease <id> not found`, comes back;
   - have something periodic (a timer, your worker loop) retry whatever is still pending.
 
-  A renew that fails the same way is retried within the TTL; it is not a lost lease. On 25 Nov one 502 on a release held 32 GB of slice's GPU for three hours, and another held 16 GB on Obelisk.
+  A 401 or 403 is not a restart: the service is releasing with the wrong identity, or its token was rotated. Stop retrying it and report it. Any other 4xx, including a 404 without that body, is not a release either: keep the id and report it.
+
+  A renew that fails the same way is retried within the TTL; it is not a lost lease. Keep the TTL well above the one-minute restart, so a renew can miss a restart and still land. On 25 Nov one 502 on a release held 32 GB of slice's GPU for three hours, and another held 16 GB on Obelisk.
 - **On a `hold` resource the TTL doesn't give memory back.** Check `GET /resources/{id}` → `expiry_policy`. An expired lease there stays `unsettled`, holding its memory, until its holder releases it.
 - Answer a health check, so the plane can see it is alive.
 

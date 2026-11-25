@@ -2,6 +2,21 @@
 
 What each release changed.
 
+## 2026-11-26 — sc-lease 1.3.0: a release lands through a plane restart
+
+- **`sc-lease` 1.3.0:** `release` retries no answer, a 5xx and a 429 with back-off (2 s doubling, at most 60 s) for `--retry S` seconds, 300 by default. A retried call gives up on a hanging connection after 60 s. Only the plane's own 404 (`Lease <id> not found`) counts as already gone; another 404, a 401/403 (wrong or rotated identity) and any other 4xx stop at once. Exit 5 says the lease was not released and to keep the id. It used to exit 5 on the first 502 or connection error, and to treat any 404 as gone.
+- `hold` keeps renewing through a renew with no answer, and through a 404 that isn't the plane's answer for this lease (a route 404 mid-restart). It ends only on the plane's own 404 for the lease: not found, no longer active, or out of the queue. It used to end on the first connection error, and on any 404, which left the lease to expire while the work ran (claude-producer's review, task 1473).
+- `queue.md` (skill 3.13.4), from claude-producer's review of 3.13.3: a 401 or 403 on release is the wrong or a rotated identity, so stop and report it rather than retry; keep the TTL well above the one-minute restart; 429s are retried with the rest; `sc-lease release` retries on its own.
+
+## 2026-11-26 — sc-job 1.0.2: review fixes
+
+- **`sc-job` 1.0.2, from claude-producer's review of 1.0.1 (#1447):**
+  - Redaction hides only the grant's own shape, `sc_grant_` and 43 of `[A-Za-z0-9_-]` (the plane mints `sc_grant_` + `token_urlsafe(32)`), so a result named `sc_grant_report-2026.txt` prints as it is.
+  - The grant is hidden before any text is cut for printing (300 characters for an error, 80 for a progress line), so a secret straddling the cut no longer prints in part. A 400 echoing the grant at character 260 printed 42 of its 43 characters (claude-producer's review of 1.0.2, task 1473).
+  - Movement, for a status sc-job doesn't know, is an answer the wait hasn't seen before: any field, except clock-like ones (`*_at`, `*_s`, `*_ms`, `*_ts`, `updated`, `heartbeat`, …). A job moving only in a field sc-job never named (`percent`) is waited out; one flapping between two statuses stops 20 polls after both were seen; one whose clock fields tick but which is stuck stops at 20.
+  - SIGINT with SIGTERM no longer prints "grant … stays live" and then revokes it. The Ctrl-C note is decided once, with SIGTERM and SIGHUP blocked: a stop already delivered or pending wins (revoke, fetch line), and one that comes after the decision stays blocked and is dropped at exit, so the note's word holds.
+- `tools.md` (skill 3.24.2): "Find and call a service" states that rule.
+
 ## 2026-11-25 — queue.md: make every release land
 
 - `queue.md` (skill 3.13.3), "Build a service": retry a release that gets no answer, a 5xx or a 429 with back-off, keep the id on disk until it's acknowledged, and retry what's pending periodically. A renew failing the same way is retried within the TTL. On a `hold` resource an expired lease keeps its memory until it is released. Two lost releases on 25 Nov held 32 GB of slice's GPU for three hours and 16 GB of Obelisk's (#1145).

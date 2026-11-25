@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# JOB_VERSION: 1.0.1
+# JOB_VERSION: 1.0.2
 # Served as GET /api/v1/helpers/job. Install from the plane you call from:
 #   curl -s -H @"$HOME/.samcloud/__TOKEN_HDR__" __API__/helpers/job > ~/.local/bin/sc-job && chmod +x ~/.local/bin/sc-job
 """sc-job — call a service on the plane: submit a job, wait for it, keep what it made.
@@ -25,11 +25,13 @@ the markdown, don't upload the downloads again.
 
 The job ends `done`, or as a failure: `failed`, `cancelled` (or `canceled`),
 `error` or `expired`. `queued` and `running` are waited out. Any other status
-is named once on stderr and waited out for as long as the answer changes (its
-status, stage, progress or position). After 20 polls in a row with the same such
-answer, or with no status at all, or 5 polls in a row that answer an error or no
-JSON, sc-job stops waiting (exit 2) and leaves the job and its grant alone,
-printing how to resume.
+is named once on stderr and waited out for as long as the job keeps giving
+answers it hasn't given before: any field counts (stage, progress, percent,
+position), except clock-like ones (`*_at`, `*_s`, `updated`, `heartbeat`, …).
+After 20 polls in a row with nothing new, or with no status at all, or 5 polls
+in a row that answer an error or no JSON, sc-job stops waiting (exit 2) and
+leaves the job and its grant alone, printing how to resume. Two statuses that
+alternate stop too, once both have been seen.
 
 --store GROUP mints a grant for that service and that plane group (one you
 edit, from `GET /groups`), adds it to BODY as "grant", and revokes it when the
@@ -38,7 +40,8 @@ stop waiting with Ctrl-C, the job carries on and the grant stays live until its
 ttl so the uploads still land; sc-job prints the `sc-job fetch … --grant ID`
 line that resumes, downloads and then revokes it. SIGTERM or SIGHUP revokes the
 grant (the job's uploads will then fail) and prints the fetch line; so does a
-Ctrl-C that comes with one, in either order. If a revoke fails it says so,
+Ctrl-C that comes with one, if the stop is there when the Ctrl-C note starts
+(a stop after that is dropped, so what was printed holds). If a revoke fails it says so,
 prints the command, and carries on.
 
 What a service has to answer (tools.md, "Register a service"): the submit reply
@@ -54,7 +57,7 @@ Where it calls (as sc-say): --plane NAME (a plane the serving plane names) > $SA
 Auth — a 0600 header file, never the bearer on a command line (#582):
   --hdr FILE (must exist) > $SAMCLOUD_AUTH_HDR > ~/.samcloud/token.hdr
 The bearer goes only to the plane and to the service's own https address, and is
-never printed. Nor is a grant: any sc_grant_… in what sc-job prints (a service's
+never printed. Nor is a grant: a grant secret in what sc-job prints (a service's
 error that echoes the request, --json, status) shows as sc_grant_[redacted]. API calls follow a redirect only to the same origin. A download
 may follow an https redirect to another host, without the bearer; a redirect to
 plain http is refused. Python 3 standard library only.
@@ -79,7 +82,10 @@ OK = ("done",)
 FAILED = ("failed", "cancelled", "canceled", "error", "expired")
 WAITING = ("queued", "running")
 UNKNOWN_WARN_AFTER = 3     # polls with an unfamiliar status before it is named
-UNKNOWN_LIMIT = 20         # polls in a row with no status, or an unfamiliar one that doesn't change
+UNKNOWN_LIMIT = 20         # polls in a row with no status, or an unfamiliar one bringing no new answer
+SEEN_LIMIT = 4096          # distinct answers remembered per wait; past that, it starts again
+# Fields that change on every poll whether or not the job moves: not movement.
+CLOCK = re.compile(r"(_at|_s|_ms|_ts)$|^(time|timestamp|now|ts|updated|heartbeat|elapsed|eta|expires)$", re.I)
 POLL_BAD_LIMIT = 5         # polls in a row answering an error or no JSON
 EMBED_LIMIT = 24           # plane files whose record sc-job reads for their markdown
 try:
@@ -91,7 +97,9 @@ JOB_ID = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,127}")
 LOOPBACK = ("localhost", "127.0.0.1", "::1")
 ANSI = re.compile(r"\x1b\[[0-?]*[ -/]*[@-~]|\x1b\][^\x07\x1b]*(\x07|\x1b\\)?")
 CONTROL = re.compile(r"[\x00-\x1f\x7f-\x9f]")
-GRANT_SECRET = re.compile(r"sc_grant_[A-Za-z0-9_-]+")     # the plane mints sc_grant_ + token_urlsafe
+# The plane mints "sc_grant_" + secrets.token_urlsafe(32): always 43 of [A-Za-z0-9_-]. Only that shape
+# is hidden, so a file named sc_grant_report-2026.txt prints as it is.
+GRANT_SECRET = re.compile(r"sc_grant_[A-Za-z0-9_-]{43}")
 
 
 def _pair(name, default):
@@ -145,8 +153,9 @@ class Redacted:
 
 
 def clean(value, limit=300):
-    """An untrusted string, safe to print: escape sequences and control characters removed."""
-    s = CONTROL.sub(" ", ANSI.sub("", str(value)))
+    """An untrusted string, safe to print: escape sequences and control characters removed, and any
+    grant secret hidden before the cut, so a secret straddling it can't print in part."""
+    s = GRANT_SECRET.sub("sc_grant_[redacted]", CONTROL.sub(" ", ANSI.sub("", str(value))))
     return s[:limit] + ("…" if len(s) > limit else "")
 
 
@@ -441,7 +450,7 @@ def flatten(value, role=""):
 
 def wait(c, base, poll, job):
     last, delay, bad = None, POLL_MIN, 0
-    answer, stale, odd, warned = None, 0, 0, False
+    answers, stale, odd, warned = set(), 0, 0, False
     while True:
         try:
             j = c.call("GET", base + poll, tries=None, what=f"polling job {job}")
@@ -465,7 +474,6 @@ def wait(c, base, poll, job):
             delay = min(POLL_MAX, delay + POLL_MIN)
         if status in OK + FAILED:
             return j
-        seen = now + (json.dumps(j.get("progress"), sort_keys=True, default=str),)
         if status in WAITING:
             stale = odd = 0
         else:
@@ -474,13 +482,26 @@ def wait(c, base, poll, job):
                 warned = True
                 note(f"{PROG}: job {job} reports status {clean(status, 40)!r}, which sc-job doesn't know; "
                      f"still waiting for done, or one of {', '.join(FAILED)}")
-            # A changing answer is progress, however the service names it; no status never is.
-            stale = stale + 1 if status is None or seen == answer else 1
+            # An answer never seen before is movement, whichever field moved. One seen before isn't,
+            # so a job flapping between two statuses ends too. No status is never movement.
+            key = json.dumps(movement(j), sort_keys=True, default=str)
+            if len(answers) >= SEEN_LIMIT:
+                answers.clear()
+            stale = 1 if status is not None and key not in answers else stale + 1
+            answers.add(key)
             if stale >= UNKNOWN_LIMIT:
                 raise PollLost(f"job {job} has answered " + ("no status" if status is None else
-                               f"status {clean(status, 40)!r}, unchanged,") + f" for {stale} polls")
-        answer = seen
+                               f"status {clean(status, 40)!r} with nothing new") + f" for {stale} polls")
         time.sleep(delay)
+
+
+def movement(value):
+    """The answer without its clock fields: what has to be new for a poll to count as movement."""
+    if isinstance(value, dict):
+        return {k: movement(v) for k, v in value.items() if not CLOCK.search(str(k))}
+    if isinstance(value, list):
+        return [movement(v) for v in value]
+    return value
 
 
 def position(j):
@@ -605,11 +626,20 @@ def stopped_note(c, a, job, poll, grant, signame):
 def interrupted_note(c, a, job, poll, grant):
     """Ctrl-C while waiting keeps the grant: someone chose to leave the job running. A SIGTERM or
     SIGHUP with it (a closing terminal, a supervisor, timeout) means sc-job is being shut down,
-    perhaps with no one to read the hint: that wins, and the grant is revoked as for SIGTERM alone."""
-    if not _SIGNALS["stop"]:
+    perhaps with no one to read the hint: that wins, and the grant is revoked as for SIGTERM alone.
+    It is decided once, and what is printed holds: the stops are blocked first, so one that comes
+    after the decision stays blocked and is dropped at exit. A stop whose handler has run, or that
+    is pending, wins. Order is as delivered and handled, which needn't be the order sent."""
+    stops = {s for s in (getattr(signal, n, None) for n in ("SIGTERM", "SIGHUP"))
+             if s is not None and signal.getsignal(s) != signal.SIG_IGN}
+    signal.pthread_sigmask(signal.SIG_BLOCK, stops)
+    pending = sorted(stops & signal.sigpending())
+    stop = _SIGNALS["stop"] or (signal.Signals(pending[0]).name if pending else None)
+    if stop:
+        stopped_note(c, a, job, poll, grant, stop)
+    else:
         kept_note(c, a, job, poll, grant, "stopped waiting")
-    if _SIGNALS["stop"]:                    # it came before the note, or during it
-        stopped_note(c, a, job, poll, grant, _SIGNALS["stop"])
+
 
 
 def cmd_call(c, a):
@@ -686,7 +716,7 @@ def cmd_fetch(c, a):
 
 def cmd_list(c, a):
     rows = c.call("GET", f"{c.api}/services")
-    for s in rows if isinstance(rows, list) else rows.get("services", []):
+    for s in rows:                          # the plane answers a bare list (list_services)
         desc = re.split(r"(?<=[.!?])\s|\n", clean(s.get("description") or "", 2000).strip(), maxsplit=1)[0][:120]
         url = s.get("external_url")
         where = clean(url, 120) if callable_url(url) else \
