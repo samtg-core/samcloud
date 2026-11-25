@@ -183,7 +183,13 @@ hold)
     call POST "/leases/$target/renew" "{\"ttl_seconds\": $ttl}"
     case "$code" in
       2*) [ "$(field reason)" = "ttl_below_granted" ] && say "renewal extends nothing: --ttl $ttl is below the grant" ;;
-      404) say "lease $target is gone ($(field detail status)); hold ends"; exit 0 ;;
+      # Only the plane's own answer for this lease ends the hold ("Lease <id> not found", "… is
+      # released, not active", "… left the queue"). A route 404 mid-restart is retried, so the
+      # lease isn't let go while the work runs.
+      404) case "$resp" in
+             *"Lease $target "*) say "lease $target is gone ($(field detail status)); hold ends"; exit 0 ;;
+           esac
+           say "renew HTTP 404 that is not the plane's answer for this lease — still holding: $resp" ;;
       *) say "renew HTTP $code: $resp" ;;
     esac
   done ;;

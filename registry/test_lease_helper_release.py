@@ -97,6 +97,16 @@ def test_hold_survives_a_renew_with_no_answer(tmp_path):
     assert 'hold ends' in r.stderr
 
 
+@pytest.mark.parametrize('gone', ['{"detail":"Lease L1 not found"}',
+                                  '{"detail":{"detail":"Lease L1 is released, not active","status":"released"}}',
+                                  '{"detail":{"detail":"Lease L1 left the queue while its wait was renewed"}}'])
+def test_hold_ends_only_on_the_planes_own_404(tmp_path, gone):
+    r, calls = run(tmp_path, ['404 {"detail":"Not Found"}', '404 {"detail":"Lease L12 not found"}', '404 Not Found',
+                              f'404 {gone}'], 'hold', 'L1', '--ttl', '30', '--every', '1')
+    assert r.returncode == 0, r.stderr
+    assert len(calls) == 4 and r.stderr.count('still holding') == 3 and 'hold ends' in r.stderr
+
+
 def test_acquire_still_has_no_time_limit(tmp_path):
     r, calls = run(tmp_path, ['200 {"id":"L1","status":"granted"}'], 'acquire', 'res/gpu-0', '--memory', '10')
     assert calls and '-m 60' not in calls[0]
