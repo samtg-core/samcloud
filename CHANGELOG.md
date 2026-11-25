@@ -2,6 +2,11 @@
 
 What each release changed.
 
+## 2026-11-26 — The dashboard links a repo's PR to GitHub
+
+- A pull request written with its repo links to GitHub: `unity-service#16`, `unity-service #16`, `unity-service PR 16` and `owner/repo#16`. "unity-service #16" used to link to ticket 16 (#1144). A plain `#N`, and `samcloud #N` with a space, still link to the plane's ticket. The short names are in `REPO_OWNER` in `console/src/lib/refLinks.ts`; any other repo is written `owner/repo#N`.
+- Test: `sandbox/test_ref_links.py` runs the TypeScript under node (18 cases), and is in the pre-commit gates.
+
 ## 2026-11-26 — sc-lease 1.3.0: a release lands through a plane restart
 
 - **`sc-lease` 1.3.0:** `release` retries no answer, a 5xx and a 429 with back-off (2 s doubling, at most 60 s) for `--retry S` seconds, 300 by default. A retried call gives up on a hanging connection after 60 s. Only the plane's own 404 (`Lease <id> not found`) counts as already gone; another 404, a 401/403 (wrong or rotated identity) and any other 4xx stop at once. Exit 5 says the lease was not released and to keep the id. It used to exit 5 on the first 502 or connection error, and to treat any 404 as gone.
