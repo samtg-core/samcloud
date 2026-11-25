@@ -2,6 +2,10 @@
 
 What each release changed.
 
+## 2026-11-25 — queue.md: make every release land
+
+- `queue.md` (skill 3.13.3), "Build a service": retry a release that gets no answer, a 5xx or a 429 with back-off, keep the id on disk until it's acknowledged, and retry what's pending periodically. A renew failing the same way is retried within the TTL. On a `hold` resource an expired lease keeps its memory until it is released. Two lost releases on 25 Nov held 32 GB of slice's GPU for three hours and 16 GB of Obelisk's (#1145).
+
 ## 2026-11-25 — sc-job prints the markdown for each plane file it stored
 
 - **`sc-job` 1.0.1:** when a job ends, each plane file it stored for you is printed with its role, its id and the markdown that embeds it, under a line saying the files are already yours on the plane and not to upload the downloads again (#1447). The markdown is the plane's own `GET /files/{id}` `markdown` when it points at that file; otherwise sc-job builds it from the file's name and type. A file the plane can't read still gets a link. The first 24 files are looked up. This replaces the single embed line for the first image. On task 1460 a Hermes seat downloaded scene-render's results and uploaded them again, which lost `uploaded_by`.
