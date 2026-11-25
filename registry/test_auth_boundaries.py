@@ -135,9 +135,10 @@ def test_route_activation_is_scoped_before_any_external_effect(client,monkeypatc
     forward,caddy,dns=Mock(return_value=(True,'ok')),Mock(return_value=(True,'ok')),Mock(return_value={'success':True})
     monkeypatch.setattr(main.forward,'start_forward',forward)
     monkeypatch.setattr(main.caddy,'append_route',caddy); monkeypatch.setattr(main,'_dns_record',dns)
+    preflight=Mock(return_value=None); monkeypatch.setattr(main,'_dns_preflight',preflight)   # a zone read is external too
     for caller,status in [(outsider,404),(viewer,403)]:
         assert caller.post('/api/v1/routes/app/activate?domain=example.org').status_code == status
-        assert not forward.called and not caddy.called and not dns.called
+        assert not forward.called and not caddy.called and not dns.called and not preflight.called
     assert editor.post('/api/v1/routes/app/activate?domain=example.org').status_code == 200
     service=AuthedClient(client._client,enrollment.generate_service_token('box/web'))
     assert service.post('/api/v1/routes/app/activate?domain=example.org').status_code == 200
