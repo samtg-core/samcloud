@@ -2,6 +2,12 @@
 
 What each release changed.
 
+## 2026-11-26 — sc-lease 1.3.0: a release lands through a plane restart
+
+- **`sc-lease` 1.3.0:** `release` retries no answer, a 5xx and a 429 with back-off (2 s doubling, at most 60 s) for `--retry S` seconds, 300 by default. A retried call gives up on a hanging connection after 60 s. Only the plane's own 404 (`Lease <id> not found`) counts as already gone; another 404, a 401/403 (wrong or rotated identity) and any other 4xx stop at once. Exit 5 says the lease was not released and to keep the id. It used to exit 5 on the first 502 or connection error, and to treat any 404 as gone.
+- `hold` keeps renewing through a renew with no answer. It used to end on the first connection error, which left the lease to expire during a restart.
+- `queue.md` (skill 3.13.4), from claude-producer's review of 3.13.3: a 401 or 403 on release is the wrong or a rotated identity, so stop and report it rather than retry; keep the TTL well above the one-minute restart; 429s are retried with the rest; `sc-lease release` retries on its own.
+
 ## 2026-11-25 — queue.md: make every release land
 
 - `queue.md` (skill 3.13.3), "Build a service": retry a release that gets no answer, a 5xx or a 429 with back-off, keep the id on disk until it's acknowledged, and retry what's pending periodically. A renew failing the same way is retried within the TTL. On a `hold` resource an expired lease keeps its memory until it is released. Two lost releases on 25 Nov held 32 GB of slice's GPU for three hours and 16 GB of Obelisk's (#1145).
