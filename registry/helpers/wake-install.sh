@@ -243,6 +243,13 @@ if curl -sf -H @"$HDR" "$API/helpers/pr" -o "$BIN_DIR/sc-pr"; then
 else
     rm -f "$BIN_DIR/sc-pr"
 fi
+# sc-job — the service caller (#1157): submit, wait, keep the results as plane files.
+# Optional for the same reason as sc-pr: an older registry does not serve it.
+if curl -sf -H @"$HDR" "$API/helpers/job" -o "$BIN_DIR/sc-job"; then
+    chmod 755 "$BIN_DIR/sc-job"
+else
+    rm -f "$BIN_DIR/sc-job"
+fi
 chmod 755 "$BIN_DIR/samcloud-listen" "$BIN_DIR/sc-say"
 # The adapter — the rail's holder for a runtime that does not stream. Fetched for every
 # seat, not only the ones that need it today: it carries a version stamp, so the listener's

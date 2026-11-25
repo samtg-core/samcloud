@@ -6754,6 +6754,11 @@ _AGENT_HELPERS = {
     # exited. What a runner job hook or a worker runs so a Unity job, a model
     # load and a splat transform queue against the same host in one order.
     "lease": "samcloud-lease",
+    # The service caller (#1157): submit a job to a registered service, wait for
+    # it, download what it made, and with --store keep it as plane files the
+    # caller owns, through a grant it mints and revokes. One command for every
+    # service that keeps the submit/poll/download contract in tools.md.
+    "job": "samcloud-job",
 }
 
 _RAIL_VERSION_CACHE: dict = {}
@@ -6771,6 +6776,7 @@ _RAIL_VERSION_SPECS = {
     "channel": ("samcloud-channel.py", r'^# CHANNEL_VERSION: (\S+)'),
     "adapter": ("samcloud-adapter.py", r'^# ADAPTER_VERSION: (\S+)'),
     "lease": ("samcloud-lease", r'^# LEASE_VERSION: (\S+)'),
+    "job": ("samcloud-job", r'^# JOB_VERSION: (\S+)'),
 }
 
 
@@ -9588,6 +9594,7 @@ def api_index():
                 "pr": {"method": "GET", "path": "/api/v1/helpers/pr", "auth": "any", "description": "sc-pr, the contribute tool: `sc-pr setup` once, then `sc-pr open --title … --ticket N` pushes your branch and opens a pull request on samcloud. The GitHub token is minted per call from the gh-broker and never touches argv or disk. Guide: skills/samcloud-agent/contributing.md"},
                 "new": {"method": "GET", "path": "/api/v1/helpers/new", "auth": "any", "description": "sc-new, the create tool: a ticket, task or doc made INTO a thread. Sends X-Session-Id (your conversation: replies come back, and the create joins the conversation's thread) and X-Thread-Id when you name one; a bare curl sends neither and lands in the identity's own thread"},
                 "edit": {"method": "GET", "path": "/api/v1/helpers/edit", "auth": "any", "description": "sc-edit, the revise tool: change a doc BODY. sc-say is comment-only and sc-new is create-only, so this is the only pen that can revise. Sends base_rev read at call time (a concurrent writer 409s instead of being overwritten), re-reads the doc after the write to verify the head is what you meant, and refuses an empty or unchanged body. Prefer --append for an additive edit: it reads the head server-side and cannot lose a revision"},
+                "job": {"method": "GET", "path": "/api/v1/helpers/job", "auth": "any", "description": "sc-job, the service caller: `sc-job call <service id> <submit path> BODY --store GROUP` submits a job to a registered service, waits for it, downloads what it made and, with --store, keeps it as plane files you own through a grant it mints and revokes. `sc-job list` shows the services you can call"},
                 "subscribe": {"method": "GET", "path": "/api/v1/helpers/subscribe", "auth": "any", "description": "For a terminal a person types into: prints what arrives for that session, as the rail would (run: curl … | python3 -)"},
                 "channel": {"method": "GET", "path": "/api/v1/helpers/channel", "auth": "any", "description": "The subscribe feed as a Claude Code channel (MCP server): each delivery is pushed into the interactive session, idle or not, with nothing to re-arm. Register it with `claude mcp add`, launch with --dangerously-load-development-channels server:samcloud (research preview)"},
                 "wsl_boot": {"method": "GET", "path": "/api/v1/helpers/wsl-boot", "auth": "any", "description": "Starts the Linux side of a Windows machine (WSL) at boot"},

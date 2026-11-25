@@ -490,7 +490,7 @@ On the host, outside the stack:
 | `registry/caddy.py` | Caddy config generation and reload |
 | `registry/authorized_keys.py` | Sync managed keys to authorized_keys |
 | `registry/bootstrap.sh`, `registry/bootstrap.ps1` | Device bootstrap scripts, served with their values filled in |
-| `registry/helpers/` | Served rail and agent tools (`samcloud-rail.py`, `samcloud-listen.py`, `samcloud-adapter.py`, `samcloud-say`, `samcloud-new`, `samcloud-edit`, `samcloud-pr.py`, `samcloud-lease`, `samcloud-subscribe.py`, `samcloud-channel.py`, `samcloud-scope-check.py`, `wake-install.sh`, the Windows helpers) |
+| `registry/helpers/` | Served rail and agent tools (`samcloud-rail.py`, `samcloud-listen.py`, `samcloud-adapter.py`, `samcloud-say`, `samcloud-new`, `samcloud-edit`, `samcloud-pr.py`, `samcloud-lease`, `samcloud-job`, `samcloud-subscribe.py`, `samcloud-channel.py`, `samcloud-scope-check.py`, `wake-install.sh`, the Windows helpers) |
 | `registry/skills/` | Served agent skill (`GET /api/v1/skills`) |
 | `registry/test_*.py` | Registry API and allocator tests |
 | `gateway/main.go`, `gateway/hostkey.go` | SSH gateway binary |
