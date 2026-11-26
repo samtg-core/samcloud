@@ -2,6 +2,23 @@
 
 What each release changed.
 
+## 2026-11-26 — sc-job 1.1.0: `check` reads a service against the standard
+
+- **`sc-job check <service>… | --all [--submit PATH] [--json]`** reads each entry in `GET /services` and probes it as a caller would, against doc 793. The kind it declares decides which lines are critical. That kind is a capability word: `compute-job`, `compute-sync`, `no-compute` or `pointer`.
+- **Critical lines** are PASS or FAIL:
+  - kind and address;
+  - docs that open;
+  - auth: a GET with no token is refused.
+  - **own id**, for the compute kinds, judged by the current evidence. The newest lease is held as the service, and one has been granted and released as it. Older rows held as a user are history. A newest lease held as a user fails, and so does no lease at all on a device whose leases you can see. What you can't see, or a lease never granted and released, is `?` (unverified).
+  - **for `compute-job`, the `{}` submit with `--submit`.** It's refused as input (400 or 422 with a JSON error). A 404, 405, 401 or 403 is no operation or no access, and fails. Without `--submit` it's `?`. Results to the grant are always `?`, because they can't be seen from outside.
+- **A pointer** passes if its address answers with a page or a sign-in challenge (2xx, 3xx, 401, 403), redirects followed with no token. A 404 or a 5xx fails.
+- **Notes** never fail the run: description length, capabilities, version (any value passes for now) and health. Exit 1 only on a critical FAIL.
+- **What it sends:**
+  - its only write is the `{}` POST, with your token. A job started from it is withdrawn at once on its poll path, with stops held until the `DELETE` is sent. Only a 2xx counts as withdrawn; anything else, a 404 included, says "not withdrawn, tell the owner".
+  - a guide is tried without your token first. Your token goes only to the plane or the service's own address, after a 401/403.
+- **Bounded:** each probe gets 15 s of wall time for the whole call, headers and body, so a service dripping bytes can't hold it. `--all` checks 8 services at once, and an entry it can't read gets its own FAIL line (task 1472; claude-producer's and codex's reviews of PR 51).
+- **Tests:** `sandbox/test_sc_job.py`, 61 check cases.
+
 ## 2026-11-26 — Lease waits can't stall the plane
 
 - `GET /leases/{id}/wait` used to sleep on a request thread for its whole timeout, up to 120 s. The registry is one process, and its sync routes share anyio's 40 threads, so about 40 waits from any token holder stopped the rest of the API answering (claude-producer, task 1472). The wait is now `async`: it sleeps on the event loop and borrows a thread only to look, once a second. A caller holds at most 8 waits at once and the plane 64 (`LEASE_WAIT_PER_CALLER`, `LEASE_WAIT_TOTAL`); the next is `429` with `Retry-After: 5`. Today's callers (`sc-lease`) hold one wait per lease.
