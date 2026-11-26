@@ -10,6 +10,7 @@ Run: python3 sandbox/test_sc_job.py
 """
 import importlib.machinery
 import importlib.util
+import datetime
 import hashlib
 import json
 import os
@@ -46,6 +47,8 @@ class State:
         self.grants, self.revoked = {}, set()
         self.posts, self.gets = {}, {}
         self.secrets = []
+        self.checks = []
+        self.role = "member"
         self.next_grant = 20
 
 
@@ -100,7 +103,21 @@ class Plane(Base):
                 {"id": "dev/render", "last_health_status": 200, "external_url": SVC_URL,
                  "description": "Renders \x1b[31mthings\x1b[0m. Second sentence."},
                 {"id": "dev/plain", "external_url": "http://example.invalid", "description": "Plain."},
-                {"id": "dev/none", "external_url": None, "description": "Nowhere."}])
+                {"id": "dev/none", "external_url": None, "description": "Nowhere."}] + check_entries())
+        if method == "GET" and p.startswith("/api/v1/leases?service_id="):
+            sid = urllib.parse.unquote(p.split("=", 1)[1])
+            if sid == "chk/leasefail":
+                return self.send(500, {"detail": "down"})
+            rows = [(a, "released") if isinstance(a, str) else a for a in CHK_LEASES.get(sid, [])]
+            return self.send(200, [{"id": f"lease_{i}", "agent_id": a, "status": st,
+                                    "granted_at": None if st == "queued" else "2026-11-25T00:00:00+00:00"}
+                                   for i, (a, st) in enumerate(rows)])
+        if method == "GET" and p == "/api/v1/resources":
+            return self.send(200, [{"id": "chk/gpu-0", "device_id": "chk"}])
+        if method == "GET" and p == "/api/v1/auth/verify":
+            return self.send(200, {"username": "tester", "role": S.role})
+        if method == "GET" and p == "/api/v1/docs/750":
+            return self.send(200, {"id": 750, "title": "a caller's guide"})
         if method == "GET" and p == "/api/v1/services/dev%2Frender":
             return self.send(200, {"id": "dev/render", "external_url": SVC_URL})
         if method == "GET" and p == "/api/v1/services/dev%2Fclosed":
@@ -451,7 +468,133 @@ class Other(Base):
         return self.send(200, raw=b"REDIRECTED")
 
 
-plane_srv, svc_srv, other_srv = server(Plane), server(Service), server(Other)
+class CheckSvc(Base):
+    """`sc-job check` probes: /<name>/... answers as that service would."""
+    def reply(self, method):
+        body = self.body() if method == "POST" else None
+        with S.lock:
+            S.checks.append((method, self.path, self.headers.get("Authorization"), body))
+        parts = self.path.split("/", 2)
+        name, rest = parts[1], "/" + (parts[2] if len(parts) > 2 else "")
+        authed = self.headers.get("Authorization") == TOKEN
+        if name == "open":                       # answers anything, token or not
+            return self.send(200, {"ok": True})
+        if name == "c404":                       # routes before auth: an unknown path is 404 either way
+            return self.send(404, {"error": "no such route"})
+        if name == "redir":                      # a web app that sends you to its sign-in page elsewhere
+            return self.send(302, {}, headers=[("Location", f"{OTHER_URL}/landing")])
+        if name == "ptr404":                     # a page that isn't there
+            return self.send(404, {"detail": "Not Found"})
+        if name == "slowhead" and not authed:    # sends its status line a byte at a time, slower than any deadline
+            try:
+                for b in b"HTTP/1.1 401 Unauthorized\r\n":
+                    self.wfile.write(bytes([b]))
+                    self.wfile.flush()
+                    time.sleep(0.5)
+            except OSError:
+                pass
+            self.close_connection = True
+            return
+        if name.startswith("hang") and not authed:   # never answers in time
+            time.sleep(6)
+            return self.send(401, {"error": "late"})
+        if name == "drip" and not authed:        # answers at once, then drips its body for 30 s
+            self.send_response(401)
+            self.send_header("Content-Length", "100")
+            self.end_headers()
+            for _ in range(100):
+                try:
+                    self.wfile.write(b"x")
+                    self.wfile.flush()
+                except OSError:
+                    return
+                time.sleep(0.3)
+            return
+        if not authed:
+            return self.send(403 if name == "forbid" else 401, {"error": "a bearer is required"})
+        if rest == "/guide" and name == "redirdocs":
+            return self.send(302, {}, headers=[("Location", f"{OTHER_URL}/guide")])
+        if rest == "/guide":
+            return self.send(200, {"guide": True})
+        if method == "POST" and rest == "/submit":
+            return {"good": lambda: self.send(422, {"error": "prompt is required"}),
+                    "starts": lambda: self.send(202, {"job": "K1", "status": "queued", "poll": "/jobs/K1"}),
+                    "startsnoid": lambda: self.send(202, {"status": "queued"}),
+                    "boom": lambda: self.send(500, {"error": "oops"}),
+                    "html": lambda: self.send(400, raw=b"<html>bad</html>"),
+                    "nocomp": lambda: self.send(202, {"job": "K2", "status": "queued"}),
+                    "delfail": lambda: self.send(202, {"job": "K5"}),
+                    "badpoll": lambda: self.send(202, {"job": "K3", "poll": "/../x"}),
+                    "intjob": lambda: self.send(202, {"job": 7}),
+                    "pollpath": lambda: self.send(202, {"job": "K4", "poll": "/q/K4"}),
+                    "del404": lambda: self.send(202, {"job": "K6"})}.get(name, lambda: self.send(404, {"error": "no"}))()
+        if method == "DELETE":
+            return self.send({"delfail": 500, "del404": 404}.get(name, 200), {"status": "cancelled"})
+        return self.send(404, {"error": "no"})
+
+    def do_GET(self):
+        self.reply("GET")
+
+    def do_POST(self):
+        self.reply("POST")
+
+    def do_DELETE(self):
+        self.reply("DELETE")
+
+
+CHK_LEASES = {"chk/good": ["chk/good"] * 25, "chk/open": ["user:9", "chk/open"], "chk/sync": ["user:60", "chk/sync"],
+              "chk/nocomp": ["user:3"], "chk/undecl": ["user:5"], "chk/notes": ["chk/notes"], "chk/stalest": ["chk/stalest"],
+              "chk/starts": ["chk/starts"], "chk/html": ["chk/html"], "chk/boom": ["chk/boom"], "chk/startsnoid": ["chk/startsnoid"],
+              "chk/elsewhere": ["chk/elsewhere"], "chk/oldplane": ["chk/oldplane"], "chk/oldstale": ["chk/oldstale"],
+              **{f"chk/{n}": [f"chk/{n}"] for n in ("forbid", "nodocs", "docs404", "redirdocs", "delfail", "badpoll",
+                                                    "intjob", "pollpath", "hang", "hang2", "hang3", "drip", "notroute",
+                                                    "slowhead", "del404")},
+              "chk/cut": ["chk/cut"] + ["user:82"] * 3, "chk/qonly": [("chk/qonly", "queued"), ("chk/qonly", "active")]}
+
+
+def check_entries():
+    """GET /services rows for `sc-job check`; dev/render stays first for the list checks."""
+    now = datetime.datetime.now(datetime.timezone.utc)
+    ok = {"description": "Makes a thing from a prompt; POST /submit {prompt}, poll /jobs/{job}.",
+          "capabilities": ["compute-job", "thing"], "version": "1.2.3+abcdef1", "status": "online", "health_age_s": 10,
+          "docs_endpoint": "/api/v1/docs/750"}
+    row = lambda sid, **kw: {"id": sid, **ok, "external_url": f"{CHK_URL}/{sid.split('/')[1]}", **kw}
+    return [row("chk/good"),
+            row("chk/bad", description="Short.", capabilities=[], external_url=None, version="0.1",
+                status="stale", health_age_s=90000, docs_endpoint="docs/README.md"),
+            row("chk/open", docs_endpoint="/guide", health_age_s=None),
+            row("chk/starts"), row("chk/startsnoid"), row("chk/boom"), row("chk/html"), row("chk/c404"),
+            row("chk/elsewhere", docs_endpoint=f"{OTHER_URL}/guide"),
+            {k: v for k, v in row("chk/oldplane", docs_endpoint="/guide",
+                                  last_health=(now - datetime.timedelta(seconds=60)).isoformat()).items()
+             if k != "health_age_s"},
+            {k: v for k, v in row("chk/oldstale", docs_endpoint="/guide",
+                                  last_health=(now - datetime.timedelta(days=3)).strftime("%Y-%m-%d %H:%M:%S")).items()
+             if k != "health_age_s"},
+            row("chk/ptr", capabilities=["pointer"], description="Photos.", docs_endpoint=None, version=None, health_age_s=None),
+            row("chk/ptrdead", capabilities=["pointer"], external_url=f"http://127.0.0.1:{CLOSED_PORT}"),
+            row("chk/ptrbare", capabilities=["pointer"], description="  ", external_url=None),
+            row("chk/sync", capabilities=["compute-sync"]),
+            row("chk/nocomp", capabilities=["no-compute", "thing"]),
+            row("chk/two", capabilities=["compute-job", "pointer"]),
+            row("chk/undecl", capabilities=["thing"]),
+            row("chk/leasefail"),
+            row("chk/notes", version="v1.2.3+abcdef1-dirty", health_age_s=1900),
+            row("chk/stalest", status="stale"),
+            row("chk/forbid"), row("chk/nodocs", docs_endpoint=None), row("chk/docs404", docs_endpoint="/missing"),
+            row("chk/ptrredir", capabilities=["pointer"], external_url=f"{CHK_URL}/redir"),
+            row("chk/redirdocs", docs_endpoint="/guide"),
+            row("chk/delfail"), row("chk/badpoll"), row("chk/intjob"), row("chk/pollpath"), row("chk/hang"), row("chk/drip"),
+            row("chk/hang2", docs_endpoint="/guide"), row("chk/hang3", docs_endpoint="/guide"),
+            row("chk/notroute"), row("chk/cut"), row("chk/qonly"), row("hid/svc"), row("chk/slowhead"), row("chk/del404"),
+            row("chk/ptr404", capabilities=["pointer"]),
+            {"id": None, "description": "an entry with no id"},
+            {"id": "chk/oddtypes", "description": 5, "external_url": 7, "capabilities": "compute-job",
+             "docs_endpoint": ["x"], "version": 3, "health_age_s": "x"}]
+
+
+plane_srv, svc_srv, other_srv, chk_srv = server(Plane), server(Service), server(Other), server(CheckSvc)
+CHK_URL = f"http://127.0.0.1:{chk_srv.server_port}"
 PLANE_URL = f"http://127.0.0.1:{plane_srv.server_port}"
 SVC_URL = f"http://127.0.0.1:{svc_srv.server_port}"
 OTHER_URL = f"http://localhost:{other_srv.server_port}"   # another host, and plain http
@@ -464,7 +607,8 @@ _closed.close()
 def env_for(cwd):
     env = {k: v for k, v in os.environ.items() if not k.startswith("SAMCLOUD_")}
     env.update({"HOME": cwd, "SAMCLOUD_API": f"{PLANE_URL}/api/v1", "SAMCLOUD_AUTH_HDR": HDR,
-                "SC_JOB_POLL_S": "0.02,0.05", "SC_JOB_RETRY_S": "0.02,0.05"})
+                "SC_JOB_POLL_S": "0.02,0.05", "SC_JOB_RETRY_S": "0.02,0.05",
+                "SC_JOB_PROBE_S": "2"})
     return env
 
 
@@ -1145,6 +1289,267 @@ def main():
           [(m_, p) for m_, p, _a, _b in S.service], r.stdout + r.stderr)
     r = run(["status", "dev/render", "../x"], tmp)
     check("a malformed job id on the command line is refused", r.returncode == 2, r.stdout + r.stderr)
+
+    print("sc-job — check")
+    def lines_of(r, sid):
+        out, on = {}, False
+        for l in r.stdout.splitlines():
+            if not l.startswith("  "):
+                on = l.startswith(sid + "  (")
+            elif on:
+                state, name, why = l[2:6], l[8:20].strip(), l[21:]
+                out[name] = (state.strip(), why)
+        return out
+    r = run(["check", "chk/good"], tmp)
+    g = lines_of(r, "chk/good")
+    check("check: a service meeting the standard passes every line and exits 0",
+          r.returncode == 0 and set(g) == {"kind", "address", "docs", "auth", "own id", "submit", "grant", "description",
+                                           "capabilities", "version", "health"}
+          and all(v[0] == "PASS" for k, v in g.items() if k not in ("submit", "grant")) and "chk/good  (5/5)\n" in r.stdout,
+          r.stdout + r.stderr)
+    check("check: a compute job's shape is `?` without --submit, and its grant can't be seen from outside",
+          g.get("submit") == ("?", "not probed: run with --submit <its submit path>")
+          and g.get("grant", ("",))[0] == "?", g)
+    check("check: the kind is read from capabilities", g.get("kind") == ("PASS", "compute-job"), g)
+    check("check: own id is a lease granted and released as the service, the newest held as it",
+          g.get("own id") == ("PASS", "lease lease_0 granted and released as itself"), g)
+    check("check: a plane doc is opened with the token, after a 401 without it",
+          g.get("docs", ("", ""))[1] == "/api/v1/docs/750 → 200 (with your token)", g)
+    check("check: the kind word isn't counted as a capability", g.get("capabilities") == ("PASS", "thing"), g)
+    before = len(S.checks)
+    r = run(["check", "chk/good", "--submit", "/submit"], tmp)
+    probes = S.checks[before:]
+    check("check --submit: {} refused with a 4xx JSON error passes, and names the error",
+          r.returncode == 0 and "PASS  submit       {} → 422: prompt is required" in r.stdout
+          and "chk/good  (6/6)\n" in r.stdout, r.stdout + r.stderr)
+    check("check --submit: one write, with the token and the body {}; the no-token auth probe is a GET",
+          [(m_, p_, a_, b_) for m_, p_, a_, b_ in probes if m_ != "GET"] == [("POST", "/good/submit", TOKEN, {})]
+          and ("GET", "/good/jobs/sc-job-check", None, None) in probes, probes)
+    r = run(["check", "chk/bad"], tmp)
+    b = lines_of(r, "chk/bad")
+    check("check: each critical gap fails with its reason (exit 1)", r.returncode == 1
+          and b.get("kind", ("", ""))[0] == "FAIL" and b["kind"][1].startswith("not declared: add one of compute-job")
+          and "leased" not in b["kind"][1]
+          and b.get("address", ("", ""))[0] == "FAIL" and "no external_url" in b["address"][1]
+          and b.get("docs", ("", ""))[0] == "FAIL" and "doesn't open" in b["docs"][1]
+          and "auth" not in b and "own id" not in b and "submit" not in b and "chk/bad  (0/3), 3 notes\n" in r.stdout, r.stdout)
+    check("check: what isn't critical prints as a note with its reason",
+          b.get("description", ("",))[0] == "note" and "too short" in b["description"][1]
+          and b.get("capabilities") == ("note", "none besides the kind")
+          and b.get("version") == ("PASS", "'0.1' (later: <semver>+<sha>)")
+          and b.get("health") == ("note", "stale: last report 25 h ago"), b)
+    r = run(["check", "chk/open"], tmp)
+    o = lines_of(r, "chk/open")
+    check("check: a service that answers without a token fails auth; never reported is a note",
+          r.returncode == 1 and o.get("auth") == ("FAIL", "no token → 200: it answers without one")
+          and o.get("health", ("", ""))[0] == "note" and o["health"][1].startswith("never reported"), r.stdout)
+    check("check: a compute service whose newest lease is held as a user fails own id, naming it",
+          o.get("own id") == ("FAIL", "its newest lease lease_0 (released) is held as user:9"), o)
+    check("check: a guide that opens without a token gets no token",
+          o.get("docs") == ("PASS", "/guide → 200 (without a token)")
+          and [a_ for m_, p_, a_, _ in S.checks if p_ == "/open/guide"] == [None], o)
+    r = run(["check", "chk/c404"], tmp)
+    c4 = lines_of(r, "chk/c404")
+    check("check: a 404 without a token is `?` (can't tell)", c4.get("auth") == ("?", "no token → 404: can't tell"), c4)
+    check("check: no lease under its id, on a device whose leases you can see, fails own id",
+          r.returncode == 1 and c4.get("own id", ("", ""))[0] == "FAIL"
+          and c4["own id"][1].startswith("no lease under its service id on chk, whose leases you can see"), r.stdout)
+    r = run(["check", "hid/svc"], tmp)
+    check("check: no lease you can see, on a device you can't, is unverified (`?`)",
+          lines_of(r, "hid/svc").get("own id") == ("?", "no lease under its service id that you can see: unverified"),
+          r.stdout)
+    r = run(["check", "chk/cut"], tmp)
+    check("check: after a cutover, older leases held as a user are history, not a failure",
+          r.returncode == 0 and lines_of(r, "chk/cut").get("own id")
+          == ("PASS", "lease lease_0 granted and released as itself; earlier: 3 as user:82"), r.stdout)
+    r = run(["check", "chk/qonly"], tmp)
+    check("check: leases as itself that were never granted and released are unverified, not a pass",
+          r.returncode == 0 and lines_of(r, "chk/qonly").get("own id")
+          == ("?", "its newest lease lease_0 is queued, as itself; none granted and released yet: unverified"), r.stdout)
+    r = run(["check", "chk/notroute", "--submit", "/submit"], tmp)
+    check("check --submit: a 404 with a JSON error is no route, not a refusal of the input, and fails",
+          r.returncode == 1 and lines_of(r, "chk/notroute").get("submit")
+          == ("FAIL", "{} → 404: no: not a refusal of the input (no such operation, method or access)"), r.stdout)
+    r = run(["check", "chk/ptr404"], tmp)
+    check("check: a pointer whose page is missing (404) fails",
+          r.returncode == 1 and lines_of(r, "chk/ptr404").get("address")
+          == ("FAIL", f"{CHK_URL}/ptr404 → 404: not a page a person can open"), r.stdout)
+    r = run(["check", "chk/leasefail"], tmp)
+    check("check: leases the plane won't list are `?`",
+          r.returncode == 0 and lines_of(r, "chk/leasefail").get("own id")
+          == ("?", "the plane didn't list its leases: unverified"), r.stdout)
+    before = len(S.checks)
+    r = run(["check", "chk/starts", "--submit", "/submit"], tmp)
+    st = lines_of(r, "chk/starts")
+    check("check --submit: a compute job started from {} fails, and is withdrawn at once with DELETE",
+          r.returncode == 1 and st.get("submit", ("", ""))[0] == "FAIL"
+          and "withdrew it at once: DELETE /jobs/K1 → 200" in st["submit"][1]
+          and ("DELETE", "/starts/jobs/K1", TOKEN, None) in S.checks[before:], (r.stdout, S.checks[before:]))
+    r = run(["check", "chk/startsnoid", "--submit", "/submit"], tmp)
+    check("check --submit: a 2xx with no job id fails and says it couldn't be withdrawn",
+          r.returncode == 1 and "couldn't be withdrawn: tell the owner" in r.stdout, r.stdout)
+    r = run(["check", "chk/boom", "--submit", "/submit"], tmp)
+    check("check --submit: a 5xx fails", r.returncode == 1 and "FAIL  submit       {} → 500" in r.stdout, r.stdout)
+    r = run(["check", "chk/html", "--submit", "/submit"], tmp)
+    check("check --submit: a 4xx without a JSON error fails",
+          r.returncode == 1 and "FAIL  submit       {} → 400: no JSON error" in r.stdout, r.stdout)
+    before = len(S.other)
+    r = run(["check", "chk/elsewhere"], tmp)
+    check("check: docs at a plain-http address don't count, and get no request",
+          r.returncode == 1 and "FAIL  docs" in r.stdout and len(S.other) == before, r.stdout)
+    r = run(["check", "chk/oldplane"], tmp)
+    check("check: with no health_age_s (an older plane), the age comes from last_health",
+          r.returncode == 0 and "PASS  health       reported 6" in r.stdout, r.stdout)
+    check("check: a guide on the service that wants a token gets it on the second try, not the first",
+          "PASS  docs         /guide → 200 (with your token)" in r.stdout
+          and [a_ for m_, p_, a_, _ in S.checks if p_ == "/oldplane/guide"][-2:] == [None, TOKEN], r.stdout)
+    r = run(["check", "chk/oldstale"], tmp)
+    check("check: an old naive last_health is read as UTC: a note, and the run still passes",
+          r.returncode == 0 and "note  health       stale: last report 72 h ago" in r.stdout, r.stdout)
+    r = run(["check", "chk/notes"], tmp)
+    n = lines_of(r, "chk/notes")
+    check("check: any version passes for now, one that isn't exactly <semver>+<sha> says so; 31 min without health is stale",
+          r.returncode == 0 and n.get("version") == ("PASS", "'v1.2.3+abcdef1-dirty' (later: <semver>+<sha>)")
+          and n.get("health") == ("note", "stale: last report 31 min ago") and "chk/notes  (5/5), 1 note\n" in r.stdout,
+          r.stdout)
+    r = run(["check", "chk/stalest"], tmp)
+    check("check: an entry the plane shows as `stale` is stale, whatever its age",
+          r.returncode == 0 and lines_of(r, "chk/stalest").get("health", ("",))[0] == "note", r.stdout)
+
+    before_p, before_c = len(S.plane), len(S.checks)
+    r = run(["check", "chk/ptr"], tmp)
+    pt = lines_of(r, "chk/ptr")
+    check("check: a pointer is checked only for an address that answers, with no token",
+          r.returncode == 0 and set(pt) == {"kind", "description", "address"}
+          and pt["kind"] == ("PASS", "pointer") and pt["description"] == ("PASS", "7 characters")
+          and pt["address"] == ("PASS", f"{CHK_URL}/ptr → 401") and "chk/ptr  (2/2)\n" in r.stdout, r.stdout)
+    check("check: a pointer's leases aren't read, and its address is called without a token",
+          not any("leases" in p_ for _, p_, _, _ in S.plane[before_p:])
+          and [(m_, p_, a_) for m_, p_, a_, _ in S.checks[before_c:]] == [("GET", "/ptr", None)],
+          (S.plane[before_p:], S.checks[before_c:]))
+    r = run(["check", "chk/ptrdead"], tmp)
+    check("check: a pointer whose address doesn't answer fails",
+          r.returncode == 1 and lines_of(r, "chk/ptrdead").get("address", ("", ""))[1].endswith(")")
+          and "FAIL  address" in r.stdout and "unreachable" in r.stdout, r.stdout)
+    r = run(["check", "chk/ptrbare"], tmp)
+    pb = lines_of(r, "chk/ptrbare")
+    check("check: a pointer with no address fails; no description is a note",
+          r.returncode == 1 and pb.get("description", ("",))[0] == "note" and pb.get("address") == ("FAIL", "no external_url"),
+          r.stdout)
+    r = run(["check", "chk/sync"], tmp)
+    check("check: compute-sync is held to own id too",
+          r.returncode == 1 and lines_of(r, "chk/sync").get("own id") == ("FAIL", "its newest lease lease_0 (released) is held as user:60"),
+          r.stdout)
+    r = run(["check", "chk/nocomp"], tmp)
+    check("check: a no-compute entry that has leased gets a note, not a failure",
+          r.returncode == 0 and lines_of(r, "chk/nocomp").get("own id")
+          == ("note", "declared no-compute but has 1 lease"), r.stdout)
+    before = len(S.checks)
+    r = run(["check", "chk/nocomp", "--submit", "/submit"], tmp)
+    check("check --submit: outside compute-job a started job is a note, and is still withdrawn",
+          r.returncode == 0 and "note  submit       {} started a job (202); withdrew it at once: DELETE /jobs/K2 → 200" in r.stdout
+          and ("DELETE", "/nocomp/jobs/K2", TOKEN, None) in S.checks[before:], r.stdout)
+    r = run(["check", "chk/two"], tmp)
+    check("check: two kinds declared fails",
+          r.returncode == 1 and lines_of(r, "chk/two").get("kind") == ("FAIL", "more than one: compute-job, pointer"), r.stdout)
+    r = run(["check", "chk/undecl"], tmp)
+    u = lines_of(r, "chk/undecl")
+    check("check: an undeclared entry that has leased is told it's compute, and its leases are checked",
+          r.returncode == 1 and u.get("kind", ("", ""))[1].endswith("; it has leased, so a compute kind")
+          and u.get("own id") == ("FAIL", "its newest lease lease_0 (released) is held as user:5"), r.stdout)
+
+    r = run(["check", "chk/forbid"], tmp)
+    check("check: a 403 without a token passes auth", lines_of(r, "chk/forbid").get("auth") == ("PASS", "no token → 403"),
+          r.stdout)
+    r = run(["check", "chk/nodocs"], tmp)
+    check("check: no docs_endpoint fails", r.returncode == 1
+          and lines_of(r, "chk/nodocs").get("docs") == ("FAIL", "no docs_endpoint"), r.stdout)
+    r = run(["check", "chk/docs404"], tmp)
+    check("check: a guide that answers 404 fails", r.returncode == 1
+          and lines_of(r, "chk/docs404").get("docs") == ("FAIL", "/missing → 404 (with your token)"), r.stdout)
+    before = len(S.other)
+    r = run(["check", "chk/ptrredir"], tmp)
+    check("check: a pointer's redirect to another host is followed, with no token",
+          r.returncode == 0 and lines_of(r, "chk/ptrredir").get("address") == ("PASS", f"{CHK_URL}/redir → 200")
+          and S.other[before:] == [("/landing", None)], (r.stdout, S.other[before:]))
+    before = len(S.other)
+    r = run(["check", "chk/redirdocs"], tmp)
+    rd = lines_of(r, "chk/redirdocs")
+    check("check: a guide that redirects elsewhere once your token is on is refused, not followed, and the run goes on",
+          r.returncode == 1 and rd.get("docs", ("", ""))[0] == "FAIL" and "refusing a redirect" in rd["docs"][1]
+          and "auth" in rd and S.other[before:] == [], (r.stdout, r.stderr[-300:]))
+    for name, want in (("delfail", "DELETE /jobs/K5 → 500: not withdrawn, tell the owner"),
+                       ("del404", "DELETE /jobs/K6 → 404: not withdrawn, tell the owner"),
+                       ("badpoll", "its poll path '/../x' isn't a path on the service, so it wasn't withdrawn: tell the owner"),
+                       ("intjob", "withdrew it at once: DELETE /jobs/7 → 200"),
+                       ("pollpath", "withdrew it at once: DELETE /q/K4 → 200")):
+        before = len(S.checks)
+        r = run(["check", f"chk/{name}", "--submit", "/submit"], tmp)
+        dels = [p_ for m_, p_, _, _ in S.checks[before:] if m_ == "DELETE"]
+        check(f"check --submit: a started job ({name}) says what happened to it, and exits 1, not 2",
+              r.returncode == 1 and want in lines_of(r, f"chk/{name}").get("submit", ("", ""))[1]
+              and dels == {"delfail": ["/delfail/jobs/K5"], "badpoll": [], "intjob": ["/intjob/jobs/7"],
+                           "pollpath": ["/pollpath/q/K4"], "del404": ["/del404/jobs/K6"]}[name], (r.returncode, r.stdout, dels))
+    r = run(["check", "chk/oddtypes"], tmp)
+    od = lines_of(r, "chk/oddtypes")
+    check("check: an entry with odd field types is read as missing fields, not a crash",
+          r.returncode == 1 and od.get("kind", ("",))[0] == "FAIL" and od.get("address", ("", ""))[1].startswith("no external_url")
+          and od.get("version") == ("note", "none") and "Traceback" not in r.stderr, (r.stdout, r.stderr[-300:]))
+    t0 = time.monotonic()
+    r = run(["check", "chk/hang", "chk/hang2", "chk/hang3", "chk/drip", "chk/good", "chk/ptr", "chk/forbid", "chk/sync"],
+            tmp, timeout=60)
+    took = time.monotonic() - t0
+    check("check: services that never answer, and one that drips its body, are cut off and checked side by side",
+          took < 9 and lines_of(r, "chk/hang").get("auth", ("", ""))[0] == "?"
+          and lines_of(r, "chk/hang3").get("docs", ("", ""))[0] == "FAIL"
+          and lines_of(r, "chk/drip").get("auth") == ("PASS", "no token → 401")
+          and lines_of(r, "chk/good").get("kind") == ("PASS", "compute-job"), (round(took, 1), r.stdout[-600:]))
+    t0 = time.monotonic()
+    r = run(["check", "chk/slowhead"], tmp, timeout=60)
+    took = time.monotonic() - t0
+    check("check: a service that drips its headers is cut off at the probe limit, not held by each byte",
+          took < 8 and lines_of(r, "chk/slowhead").get("auth") == ("?", "no token → no full answer within 2 s: can't tell"),
+          (round(took, 1), r.stdout[-400:]))
+    S.role = "admin"
+    r = run(["check", "--all", "--json"], tmp, timeout=90)
+    S.role = "member"
+    check("check --all as admin says a plain seat is the caller to check as", "you're checking as admin" in r.stderr,
+          r.stderr[-300:])
+
+    r = run(["check", "chk/good", "chk/bad", "--json"], tmp)
+    try:
+        j = json.loads(r.stdout)
+    except ValueError:
+        j = {}
+    check("check --json: one list of {check, pass, why, critical} per service; a critical failure exits 1",
+          r.returncode == 1 and set(j) == {"chk/good", "chk/bad"}
+          and all(set(x) == {"check", "pass", "why", "critical"} for v in j.values() for x in v)
+          and all(x["pass"] is True for x in j["chk/good"] if x["check"] not in ("submit", "grant"))
+          and {x["check"] for x in j["chk/bad"] if x["pass"] is False and not x["critical"]}
+          == {"description", "capabilities", "health"}, r.stdout[:300])
+    r = run(["check", "chk/nocomp", "--json"], tmp)
+    try:
+        j = json.loads(r.stdout)
+    except ValueError:
+        j = {}
+    check("check --json: notes alone exit 0", r.returncode == 0 and any(x["pass"] is False for x in j.get("chk/nocomp", [])),
+          r.stdout[:300])
+    r = run(["check", "--all", "--json"], tmp, timeout=90)
+    try:
+        j = json.loads(r.stdout)
+    except ValueError:
+        j = {}
+    check("check --all: every service you can see; an entry with no id is skipped, odd ones get their own lines",
+          r.returncode == 1 and "dev/render" in j and "chk/good" in j and "chk/oddtypes" in j and None not in j
+          and "null" not in j, r.stdout[:200])
+    r = run(["check", "chk/good", "chk/bad", "--submit", "/submit"], tmp)
+    check("check: --submit with more than one service is refused (exit 2)", r.returncode == 2 and "one service" in r.stderr, r.stderr)
+    r = run(["check", "chk/nope"], tmp)
+    check("check: an id not in GET /services is refused (exit 2)", r.returncode == 2 and "chk/nope" in r.stderr, r.stderr)
+    r = run(["check"], tmp)
+    check("check: no id and no --all is refused (exit 2)", r.returncode == 2, r.stderr)
+    r = run(["check", "chk/good", "--submit", "/../x"], tmp)
+    check("check: a submit path with '..' is refused", r.returncode == 2 and "refusing" in r.stderr, r.stderr)
 
     passed = sum(results)
     print(f"\n{'ALL PASSED' if passed == len(results) else 'FAILED'}: {passed} passed, {len(results) - passed} failed")
