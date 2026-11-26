@@ -1,4 +1,4 @@
-<!-- SKILL_VERSION: 3.24.2 -->
+<!-- SKILL_VERSION: 3.25.0 -->
 # tools — the API, the write tool, the helpers, the machines
 
 ## The API
@@ -389,7 +389,7 @@ curl -s -H @"$HOME/.samcloud/token.hdr" -H 'Content-Type: application/json' \
 - **Name the `subdomain` when you register.** `PATCH /services/{id}` can't add one or change the device. To move a service, register it again on the right device, switch the health reports to the new token, then `DELETE /services/{old id}`.
 - **Before you share the URL,** call it from outside with no token: every route that needs sign-in answers `401`.
 - **Who sees it:** the groups that hold its device.
-- **Write for callers who read nothing else.** In the `description`, give the submit call, the job's statuses, where results are downloaded, and, if you take grants, the `"grant"` field and the name of the list of stored file ids. Point `docs_endpoint` at your caller guide: a path on the service, or a plane doc URL. A caller who has to guess a step will get it wrong.
+- **Write for callers who read nothing else.** "The standard", below, says what the entry and the guide hold. A caller who has to guess a step will get it wrong.
 - When a service takes compute for its callers, `queue.md` has what it owes the queue.
 
 **A registered service acts as itself for its own compute and as its caller for everything else.**
@@ -407,6 +407,29 @@ POST   /services/{id}/health      with the service token: marks it online
 PATCH  /services/{id}             port, description, health_endpoint, docs_endpoint, version, capabilities
 DELETE /services/{id}             the service, its route, its DNS record and its token
 ```
+
+**The standard: what a service owes its callers** (doc 793). Declare your kind with one capability word. What's critical depends on it; everything else is a note that never blocks. `sc-job check <service>` reads both and names each gap.
+
+| kind (capability) | for | critical |
+|---|---|---|
+| `compute-job` | it leases compute and returns files (tsplat, image gen, scene-render) | it leases and releases as its own service id (`queue.md`); the `sc-job` shape, above, with `{}` refused by a 4xx JSON error; results to the caller's grant |
+| `compute-sync` | it leases compute and answers in the call (model-service) | it leases as its own id; callers queue through it (doc 768) |
+| `no-compute` | it holds no lease (asset-registry, the file plane) | its own id only where it writes for a caller, by grant |
+| `pointer` | a web app or a page a person opens | an address and a one-line description. Auth is opt-in, and there's no lease or queue, even if compute sits behind it |
+
+**Except `pointer`, every kind also owes these:**
+- an https address;
+- every call checks the bearer: no bearer gets `401`;
+- **one guide that opens from outside** (`docs_endpoint`, a path on the service or a plane doc URL), giving the call, its inputs and where results come from.
+
+**The notes:**
+- `version` as `<semver>+<sha>`, the same on every host running the same code;
+- `capabilities` in caller words (`image-generation`, `image-to-splat`);
+- a `description` written for a caller: the one call, its statuses, where results come from;
+- health: after 30 minutes without a report, an `online` entry reads `stale`, and `health_age_s` says how long. Callers use it when it's there. Only `online` ages. An entry stored as `active`, or one that has never reported, reads as up although nothing checked it, so read `health_age_s` rather than the status.
+- in the guide, beyond the call: the inputs' limits, the errors, measured time and memory per call, and the hosts it runs on.
+
+scene-render (`wafer-services/scene-render`, doc 750 §3) is the worked example.
 
 ## Threads
 

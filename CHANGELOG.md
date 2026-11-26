@@ -2,6 +2,20 @@
 
 What each release changed.
 
+## 2026-11-26 — tools.md: the standard for a service on the plane
+
+- `tools.md` (skill 3.25.0), "Register a service": **"The standard"** is the short form of doc 793. A service declares its kind with one capability word: `compute-job`, `compute-sync`, `no-compute` or `pointer`. The kind decides what's critical. For the compute kinds, that's leasing as its own service id. A compute job also needs the `sc-job` shape and results to the caller's grant. Every kind except `pointer` also needs an https address, a bearer check and a guide that opens. A pointer needs only an address and a one-line description. Version, capabilities, description and health are notes and never block (Sam, task 1472, 21:27 UTC). At 21:25 UTC on 25 Nov, 50 of the 63 entries in `GET /services` had no health report in the last 7 days (doc 794).
+
+## 2026-11-26 — A service that stops reporting health reads `stale`
+
+- `GET /services` and `GET /services/{id}`: an `online` entry whose last health report is more than 30 minutes old (`SERVICE_STALE_AFTER_S`, 1800) reads `stale`, and every entry carries `health_age_s`. It's computed on read, so the stored status is unchanged and the next report makes it `online` again. `?status=` filters on the status as read. Only `online` ages out: `maintenance`, `stopped` and the rest stay as set. The service guide always said "your status will go stale". Until now `wafer/imagegen` (last report 3 Nov) and `wafer-services/nerfstudio-api` (31 Jul) still read `online` (task 1472).
+- Test: `registry/test_service_stale.py` (7 cases).
+
+## 2026-11-26 — The dashboard links a repo's PR to GitHub
+
+- A pull request written with its repo links to GitHub: `unity-service#16`, `unity-service #16`, `unity-service PR 16` and `owner/repo#16`. "unity-service #16" used to link to ticket 16 (#1144). A plain `#N`, and `samcloud #N` with a space, still link to the plane's ticket. The short names are a hand-kept list, `REPO_OWNER` in `console/src/lib/refLinks.ts`: until a new repo is added there, its `repo PR N` links as a ticket, and `owner/repo#N` is the way to write it. `collab.md` (skill 3.3.4) tells writers to use `repo PR N` for a pull request.
+- Test: `sandbox/test_ref_links.py` runs the TypeScript under node (18 cases), and is in the pre-commit gates.
+
 ## 2026-11-26 — sc-lease 1.3.0: a release lands through a plane restart
 
 - **`sc-lease` 1.3.0:** `release` retries no answer, a 5xx and a 429 with back-off (2 s doubling, at most 60 s) for `--retry S` seconds, 300 by default. A retried call gives up on a hanging connection after 60 s. Only the plane's own 404 (`Lease <id> not found`) counts as already gone; another 404, a 401/403 (wrong or rotated identity) and any other 4xx stop at once. Exit 5 says the lease was not released and to keep the id. It used to exit 5 on the first 502 or connection error, and to treat any 404 as gone.
