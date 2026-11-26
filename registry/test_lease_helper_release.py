@@ -110,3 +110,14 @@ def test_hold_ends_only_on_the_planes_own_404(tmp_path, gone):
 def test_acquire_still_has_no_time_limit(tmp_path):
     r, calls = run(tmp_path, ['200 {"id":"L1","status":"granted"}'], 'acquire', 'res/gpu-0', '--memory', '10')
     assert calls and '-m 60' not in calls[0]
+
+
+def test_acquire_waits_on_original_lease_after_observer_limit(tmp_path):
+    answers = ['200 {"lease_id":"L1","status":"queued"}', '429 {"detail":"too many waits"}',
+               '200 {"status":"active"}']
+    result, calls = run(tmp_path, answers, 'acquire', 'res/gpu-0', '--memory', '10', '--wait')
+    assert result.returncode == 0, result.stderr
+    assert result.stdout.strip() == 'L1'
+    assert len(calls) == 3
+    assert '-X POST ' in calls[0]
+    assert all('-X GET http://registry.invalid/api/v1/leases/L1/wait?' in line for line in calls[1:])

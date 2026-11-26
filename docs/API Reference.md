@@ -781,7 +781,7 @@ A card is unread when its latest activity is newer than when you last read it, o
 | POST | `/api/v1/resources/{resource_id}/leases` | scoped | Request a lease: granted, queued (with `wait_s` or `wait: true`), or `409` with a `detail.code` |
 | GET | `/api/v1/leases` | scoped | Leases on your resources (no bearer: empty). `?resource_id`, `?service_id`, `?status` |
 | GET | `/api/v1/leases/{lease_id}` | scoped | One lease, with its queue position while it waits |
-| GET | `/api/v1/leases/{lease_id}/wait` | scoped | Long-poll a queued lease (`?timeout_s`, at most 120) |
+| GET | `/api/v1/leases/{lease_id}/wait` | scoped | Long-poll a queued lease (`?timeout_s`, at most 120). At most 8 open per caller and 64 in all; beyond is `429` with `Retry-After` |
 | POST | `/api/v1/leases/{lease_id}/renew` | the holder, or admin | `{ttl_seconds}`: extend in place, up to the lease's ceiling |
 | POST | `/api/v1/leases/{lease_id}/rollover` | the holder, or admin, and the resource's manager | `{key, ttl_seconds}`: atomically replace a finite shared allocation |
 | DELETE | `/api/v1/leases/{lease_id}` | the holder, or admin | Release; on a `hold` resource, settle an expired holder. Promotes the waiters that now fit |

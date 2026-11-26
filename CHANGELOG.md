@@ -25,6 +25,13 @@ What each release changed.
 - **Bounded:** each probe gets 15 s of wall time for the whole call, headers and body, so a service dripping bytes can't hold it. `--all` checks 8 services at once, and an entry it can't read gets its own FAIL line (task 1472; claude-producer's and codex's reviews of PR 51).
 - **Tests:** `sandbox/test_sc_job.py`, 61 check cases.
 
+## 2026-11-26 — Lease waits can't stall the plane
+
+- sc-lease 1.3.1 waits five seconds after an observer-cap 429 and polls the same queued lease again.
+
+- `GET /leases/{id}/wait` used to sleep on a request thread for its whole timeout, up to 120 s. The registry is one process, and its sync routes share anyio's 40 threads, so about 40 waits from any token holder stopped the rest of the API answering (claude-producer, task 1472). The wait is now `async`: it sleeps on the event loop and borrows a thread only to look, once a second. A caller holds at most 8 waits at once and the plane 64 (`LEASE_WAIT_PER_CALLER`, `LEASE_WAIT_TOTAL`); the next is `429` with `Retry-After: 5`. Today's callers (`sc-lease`) hold one wait per lease.
+- Test: `registry/test_lease_wait.py` (5 cases). With 50 waits open, a plain lease read answers in under 2 s. On the old code it took 4.6 s, after the waits ended.
+
 ## 2026-11-26 — tools.md: the standard for a service on the plane
 
 - `tools.md` (skill 3.25.0), "Register a service": **"The standard"** is the short form of doc 793. A service declares its kind with one capability word: `compute-job`, `compute-sync`, `no-compute` or `pointer`. The kind decides what's critical. For the compute kinds, that's leasing as its own service id. A compute job also needs the `sc-job` shape and results to the caller's grant. Every kind except `pointer` also needs an https address, a bearer check and a guide that opens. A pointer needs only an address and a one-line description. Version, capabilities, description and health are notes and never block (Sam, task 1472, 21:27 UTC). At 21:25 UTC on 25 Nov, 50 of the 63 entries in `GET /services` had no health report in the last 7 days (doc 794).

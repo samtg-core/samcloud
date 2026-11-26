@@ -50,6 +50,8 @@ What an operator sets for the registry and the console. `PUBLIC_URL` and `AUTH_S
 | `OPERATOR_TZ` | `UTC` | The operator's time zone, an IANA name such as `Europe/London`. The registry stamps "now" in this zone into `auth/verify`, user guides and served helpers, so agents reason about "morning" and "end of day" in the operator's time, and steps recurring tasks on its calendar. |
 | `REGISTRY_FILE_MAX_MB` | `1024` | Largest upload the registry accepts, in MB, for any file type. *Not passed by compose.* |
 | `REGISTRY_FILE_RESERVE_MB` | `2048` | Free space, in MB, an upload must leave on the data volume, which also holds `registry.db`, the Caddyfile and the gateway keys. An upload that would cut into it is refused. *Not passed by compose.* |
+| `LEASE_WAIT_PER_CALLER` | `8` | Most `GET /leases/{id}/wait` long-polls one caller can hold at once; the next is `429` with `Retry-After`. The wait sleeps on the event loop and borrows a request thread only to look, once a second, so this bounds those looks rather than threads. *Not passed by compose.* |
+| `LEASE_WAIT_TOTAL` | `64` | Most lease waits open on the plane at once, across all callers; beyond is `429`. *Not passed by compose.* |
 | `SERVICE_STALE_AFTER_S` | `1800` | Seconds without a health report after which `GET /services` shows an `online` service as `stale`. Each entry also carries `health_age_s`. Only a label for callers: nothing is changed in the database and no call is refused. *Not passed by compose.* |
 | `WSL_DISTRO_DEFAULT` | `Ubuntu` | WSL distribution name written into the Windows device helper scripts. *Not passed by compose.* |
 

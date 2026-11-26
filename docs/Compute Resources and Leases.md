@@ -315,7 +315,7 @@ curl -s -H @"$H" "$API/leases/lease_2c50d13a01b120ac"                     # the 
 curl -s -H @"$H" "$API/leases?resource_id=box-1/gpu-0&status=active"
 ```
 
-`wait` answers when the lease leaves the queue, or after `timeout_s` (at most 120) with `waiting: true`. Each call holds a request worker while it waits, so it suits a few waiters per host.
+`wait` answers when the lease leaves the queue, or after `timeout_s` (at most 120) with `waiting: true`. A wait doesn't hold a request worker: it looks once a second and sleeps in between, so open waits don't slow the rest of the API. A caller can hold 8 at once and the plane 64 (`LEASE_WAIT_PER_CALLER`, `LEASE_WAIT_TOTAL`). The next is `429` with `Retry-After: 5`: wait on one lease at a time, or poll `GET /leases/{id}`.
 
 ### Renew
 
