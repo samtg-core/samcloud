@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# JOB_VERSION: 1.0.2
+# JOB_VERSION: 1.1.0
 # Served as GET /api/v1/helpers/job. Install from the plane you call from:
 #   curl -s -H @"$HOME/.samcloud/__TOKEN_HDR__" __API__/helpers/job > ~/.local/bin/sc-job && chmod +x ~/.local/bin/sc-job
 """sc-job — call a service on the plane: submit a job, wait for it, keep what it made.
@@ -11,6 +11,9 @@
                                                         wait for a job you submitted, download it, revoke --grant
     sc-job status <service id> <job>                    the job as the service reports it (raw JSON)
     sc-job cancel <service id> <job>                    withdraw a queued job, or delete a finished one
+    sc-job check <service id>… | --all [--submit PATH] [--json]
+                                                        does the service meet the standard (tools.md,
+                                                        "The standard"; doc 793)? one line per check
                                                         (fetch, status and cancel take --poll PATH if not /jobs/<job>)
 
     sc-job call wafer-services/scene-render /render '{"scene":"<id>","mode":"quick"}' --store projects
@@ -49,6 +52,48 @@ names `job` (and may name `poll`, else /jobs/<job>); the poll answers `status`,
 with `error` when it failed; `results` names each file by its path under
 <poll>/files/; `plane_files` holds what it stored on your grant; DELETE on the
 poll path withdraws the job.
+
+`check` reads the service's entry and probes it as a caller would. The
+service's kind is the capability word it declares: compute-job, compute-sync,
+no-compute or pointer. The kind decides which lines are critical. A critical line
+is PASS or FAIL; any other line is PASS or `note`; `?` means a probe can't tell.
+  kind         exactly one of the four words (critical)
+A pointer is checked only for being reachable:
+  address      external_url, with no token and redirects followed, answers with a
+               page or a sign-in challenge (2xx, 3xx, 401, 403); a 404 or a 5xx
+               isn't a page a person can open (critical). A description is a note.
+For every other kind, critical:
+  address      an https external_url
+  docs         docs_endpoint opens: a plane doc, a path on the service, or another
+               https address. Tried without your token first; with it only on a
+               401/403, and only to the plane or the service's own address
+  auth         a GET with no token is refused (401 or 403); a 2xx fails; anything
+               else is `?`
+  own id       compute kinds, and an undeclared entry that has leased: judged by
+               the current evidence (GET /leases?service_id=). The newest lease is
+               held as the service, and one has been granted and released as it;
+               older rows held as a user are history. A newest lease held as a user
+               fails; so does no lease at all on a device whose leases you can see.
+               Leases you can't see, or none granted and released yet, are `?`
+               (unverified). A no-compute entry that has leased gets a note.
+  submit       with --submit PATH: an empty body ({}), sent with your token, is
+               refused as input: 400 or 422 with a JSON error. A 404, 405, 401 or
+               403 means the operation or your access isn't there, and fails. A 2xx
+               means a job started from nothing: sc-job withdraws it at once with
+               DELETE on its poll path (stops wait until that's sent) and says if
+               that failed (only a 2xx counts as withdrawn). Critical for compute-job (`?` without --submit), a note
+               for the others.
+  grant        compute-job: results go to the caller's grant. Not visible from
+               outside, so always `?`: the guide should say.
+and notes:
+  description  40 characters or more
+  capabilities at least one besides the kind
+  version      set (any value for now; <semver>+<sha> later)
+  health       reported in the last 30 minutes (not `stale`, not never)
+It writes nothing except that one POST of {}. Each probe, headers and body, gets
+15 s of wall time (SC_JOB_PROBE_S); --all checks 8 services at once, and an entry
+it can't read gets its own FAIL line. Check as a plain seat, the caller the
+standard is for, not as admin. Exit 0 when no critical line fails, 1 when one does.
 
 Exit: 0 done; 1 failed/cancelled/expired; 2 usage, HTTP or interrupted.
 
@@ -256,6 +301,7 @@ class Client:
         self.api, self.auth, self.hdr_path = api, auth, hdr_path
         self.api_opener = urllib.request.build_opener(ApiRedirects)
         self.dl_opener = urllib.request.build_opener(DownloadRedirects)
+        self.anon_opener = urllib.request.build_opener()     # check's no-token probes: redirects followed
         self.allowed = {origin(api)}
 
     def revoke_hint(self, grant_id):
@@ -725,6 +771,342 @@ def cmd_list(c, a):
     return 0
 
 
+VERSION_RE = re.compile(r"\d+\.\d+\.\d+(?:[-.][0-9A-Za-z.-]+)?\+[0-9a-f]{7,40}")
+FRESH_S = 1800          # the plane's SERVICE_STALE_AFTER_S
+CANT_TELL = object()    # a check whose answer shows nothing either way: shown `?`, never a failure
+
+
+def health_age(last_health):
+    """Seconds since last_health, for a plane that doesn't send health_age_s yet; None if absent or unreadable."""
+    import datetime as dt
+    try:
+        at = dt.datetime.fromisoformat(str(last_health).replace("Z", "+00:00")) if last_health else None
+    except ValueError:
+        return None
+    if at is None:
+        return None
+    if at.tzinfo is None:
+        at = at.replace(tzinfo=dt.timezone.utc)
+    return max(0, int((dt.datetime.now(dt.timezone.utc) - at).total_seconds()))
+
+
+PROBE_S = float(os.environ.get("SC_JOB_PROBE_S", "15"))   # the most one probe may take, answer and body
+PARALLEL = 8                                              # services checked at once by --all
+
+
+def _read_until(r, deadline, limit=1 << 20):
+    """The body, up to limit bytes, or what came before the deadline: a service that drips
+    bytes can't hold the check past it."""
+    out = b""
+    try:
+        read = getattr(r, "read1", None) or r.read
+        while len(out) < limit and time.monotonic() < deadline:
+            chunk = read(min(65536, limit - len(out)))
+            if not chunk:
+                break
+            out += chunk
+    except (OSError, http.client.HTTPException, AttributeError, ValueError):
+        pass                                    # the status already came; a body cut short is still read
+    return out
+
+
+def probe(c, method, url, body=None, token=True):
+    """One unretried call that never raises: (status, parsed JSON or None, text); status 0 when
+    there was no answer. token=True sends your token, only to an origin c.call would send it to,
+    and follows a redirect only within that origin. token=False sends none, and follows redirects
+    anywhere: there is nothing to leak. The whole call, headers and body, gets PROBE_S of wall
+    time: a socket timeout restarts with every byte, so a service dripping its headers would
+    otherwise hold the check for ever. A call cut off runs on in a daemon thread, unread."""
+    import threading
+    box = []
+    t = threading.Thread(target=lambda: box.append(_probe(c, method, url, body, token)), daemon=True)
+    t.start()
+    t.join(PROBE_S + 1)
+    return box[0] if box else (0, None, f"no full answer within {PROBE_S:g} s")
+
+
+def _probe(c, method, url, body, token):
+    if urllib.parse.urlsplit(url).scheme not in ("http", "https"):
+        return 0, None, "not an http(s) address"
+    if token and origin(url) not in c.allowed:
+        return 0, None, f"not sending your token to {clean(urllib.parse.urlsplit(url).netloc)}"
+    data = None if body is None else json.dumps(body).encode()
+    deadline = time.monotonic() + PROBE_S
+    try:
+        req = urllib.request.Request(url, data=data, method=method)
+        if token:
+            req.add_header("Authorization", c.auth)
+        if data is not None:
+            req.add_header("Content-Type", "application/json")
+        opener = c.api_opener if token else c.anon_opener
+        try:
+            with opener.open(req, timeout=PROBE_S) as r:
+                code, raw = r.status, _read_until(r, deadline)
+        except urllib.error.HTTPError as e:
+            code, raw = e.code, _read_until(e, deadline)
+    except RedirectRefused as e:
+        return 0, None, clean(e)
+    except (urllib.error.URLError, OSError, http.client.HTTPException, ValueError) as e:
+        return 0, None, clean(getattr(e, "reason", None) or e.__class__.__name__)
+    try:
+        parsed = json.loads(raw) if raw.strip() else None
+    except ValueError:
+        parsed = None
+    return code, parsed, clean(raw.decode("utf-8", "replace"), 160)
+
+
+KINDS = ("compute-job", "compute-sync", "no-compute", "pointer")   # doc 793: the kind decides what's critical
+COMPUTE = KINDS[:2]
+LEASES_READ = 20        # the newest leases the own-id line looks at
+
+
+def lease_rows(c, sid):
+    """The service's leases you can see, newest first; None if the plane didn't say."""
+    code, rows, _ = probe(c, "GET", f"{c.api}/leases?service_id={urllib.parse.quote(sid, safe='')}")
+    if code != 200 or not isinstance(rows, list):
+        return None
+    return [r for r in rows if isinstance(r, dict)]
+
+
+def visible_devices(c):
+    """Devices whose resources you can see: there, no lease means none was taken, not that it's hidden."""
+    if not hasattr(c, "_devices"):
+        code, rows, _ = probe(c, "GET", f"{c.api}/resources")
+        rows = rows.get("resources", rows) if isinstance(rows, dict) else rows
+        c._devices = {r.get("device_id") for r in rows if isinstance(r, dict)} if code == 200 and isinstance(rows, list) else set()
+    return c._devices
+
+
+def own_id(c, s, sid, rows):
+    """(ok, why) for a compute service. Judged by the newest lease and the newest one granted
+    and released as the service (the current deployment's evidence); older rows held as a user
+    are history, from before the service leased as itself."""
+    if rows is None:
+        return CANT_TELL, "the plane didn't list its leases: unverified"
+    if not rows:
+        device = s.get("device_id") if isinstance(s.get("device_id"), str) else sid.split("/")[0]
+        if device in visible_devices(c):
+            return False, (f"no lease under its service id on {clean(device, 60)}, whose leases you can see: it leases "
+                           "as a user without naming the service, or hasn't run a job yet")
+        return CANT_TELL, "no lease under its service id that you can see: unverified"
+    who = lambda r: clean(r.get("agent_id"), 80) if r.get("agent_id") else "nobody named"
+    newest = rows[0]
+    if who(newest) != sid:
+        return False, f"its newest lease {clean(newest.get('id'), 40)} ({clean(newest.get('status'), 20)}) is held as {who(newest)}"
+    done = next((r for r in rows if who(r) == sid and r.get("status") == "released" and r.get("granted_at")), None)
+    earlier = {}
+    for r in rows[:LEASES_READ]:
+        if who(r) != sid:
+            earlier[who(r)] = earlier.get(who(r), 0) + 1
+    history = ("; earlier: " + ", ".join(f"{n} as {w}" for w, n in sorted(earlier.items(), key=lambda x: -x[1]))) if earlier else ""
+    if not done:
+        return CANT_TELL, (f"its newest lease {clean(newest.get('id'), 40)} is {clean(newest.get('status'), 20)}, as itself; "
+                           f"none granted and released yet: unverified{history}")
+    return True, f"lease {clean(done.get('id'), 40)} granted and released as itself{history}"
+
+
+def _text(s, key):
+    v = s.get(key)
+    return v.strip() if isinstance(v, str) else ""
+
+
+def _service_path(p):
+    """safe_path's rule, as a yes or no instead of an exit."""
+    return (isinstance(p, str) and p.startswith("/") and not p.startswith("//") and "://" not in p
+            and "\\" not in p and ".." not in p.split("/") and "?" not in p and "#" not in p
+            and not CONTROL.search(p))
+
+
+def submit_probe(c, url, submit, crit):
+    """POST {} with your token, the one write the check makes. A job it starts is withdrawn at
+    once; SIGINT, SIGTERM and SIGHUP wait until the DELETE has been sent, so a stop can't land
+    between the two and leave the job running."""
+    stops = {signal.SIGINT, signal.SIGTERM, signal.SIGHUP}
+    signal.pthread_sigmask(signal.SIG_BLOCK, stops)
+    try:
+        code, j, text = probe(c, "POST", url + submit, {})
+        err = (j.get("error") or j.get("detail")) if isinstance(j, dict) else None
+        if not 200 <= code < 300:
+            # Only a refusal of the input shows the operation is there and checks what it's given:
+            # a missing route (404), a method it doesn't take (405) or an auth error doesn't.
+            why = f"{{}} → {code or text}" + (f": {clean(err, 100)}" if err else ": no JSON error")
+            if code in (400, 422) and err:
+                return ("submit", True, why, crit)
+            if 400 <= code < 500 and code not in (400, 422):
+                why += ": not a refusal of the input (no such operation, method or access)"
+            return ("submit", False, why, crit)
+        job = j.get("job") if isinstance(j, dict) else None
+        if isinstance(job, int) and not isinstance(job, bool):
+            job = str(job)
+        poll = j.get("poll") if isinstance(j, dict) and j.get("poll") is not None else f"/jobs/{job}"
+        if not (isinstance(job, str) and JOB_ID.fullmatch(job)):
+            why = "no job id in the answer, so it couldn't be withdrawn: tell the owner"
+        elif not _service_path(poll):
+            why = f"its poll path {clean(poll, 80)!r} isn't a path on the service, so it wasn't withdrawn: tell the owner"
+        else:
+            dc, _, dtext = probe(c, "DELETE", url + poll)
+            why = (f"withdrew it at once: DELETE {poll} → {dc}" if 200 <= dc < 300 else
+                   f"DELETE {poll} → {dc or dtext}: not withdrawn, tell the owner")
+        return ("submit", False, f"{{}} started a job ({code}); {why}", crit)
+    finally:
+        signal.pthread_sigmask(signal.SIG_UNBLOCK, stops)
+
+
+def check_service(c, s, submit=None):
+    """[(name, ok, why, critical)] for one entry from GET /services; the kind it declares decides
+    which lines are critical (doc 793). ok is True, False, or None for `?`."""
+    out = []
+    add = lambda name, ok, why, critical=True: out.append((name, None if ok is CANT_TELL else bool(ok), why, critical))
+    sid = str(s.get("id"))
+    caps = [x for x in s.get("capabilities") or [] if isinstance(x, str)] if isinstance(s.get("capabilities"), list) else []
+    declared = [k for k in KINDS if k in caps]
+    kind = declared[0] if len(declared) == 1 else None
+    rows = None if kind == "pointer" else lease_rows(c, sid)
+    leased = bool(rows)
+    if kind:
+        add("kind", True, kind)
+    elif declared:
+        add("kind", False, f"more than one: {', '.join(declared)}")
+    else:
+        add("kind", False, "not declared: add one of " + ", ".join(KINDS) + " to capabilities"
+            + ("; it has leased, so a compute kind" if leased else ""))
+    url = _text(s, "external_url").rstrip("/")
+    desc = _text(s, "description")
+
+    if kind == "pointer":                       # doc 793: a pointer is checked only for being reachable
+        if not url:
+            add("address", False, "no external_url")
+        else:
+            code, _, text = probe(c, "GET", url, token=False)
+            # A page, or a sign-in challenge, is there; a missing page or a server error isn't.
+            ok = 200 <= code < 400 or code in (401, 403)
+            add("address", ok, f"{url} → {code}" + ("" if ok or not code else ": not a page a person can open")
+                if code else f"{url}: unreachable ({text})")
+        add("description", bool(desc), f"{len(desc)} characters" if desc else "none: say in one line what it is", False)
+        return out
+
+    add("address", callable_url(url), url or "no external_url: callers can't reach it")
+    d = _text(s, "docs_endpoint")
+    if not d:
+        add("docs", False, "no docs_endpoint")
+    else:
+        plane_root = c.api[: -len("/api/v1")] if c.api.endswith("/api/v1") else c.api
+        target = (plane_root + d if d.startswith("/api/") else
+                  (url + d if callable_url(url) else None) if d.startswith("/") else
+                  d if d.startswith("https://") else None)
+        if not target:
+            add("docs", False, f"{d!r} doesn't open: not a plane doc, a path on a reachable service, or an https address")
+        else:
+            # Without your token first: most guides open to anyone, and nobody's token goes to a
+            # host that doesn't need it. With it only on a 401/403, and only to the plane or the
+            # service's own address.
+            code, _, text = probe(c, "GET", target, token=False)
+            how = "without a token"
+            if code in (401, 403) and origin(target) in c.allowed:
+                code, _, text = probe(c, "GET", target)
+                how = "with your token"
+            add("docs", code == 200, f"{d} → {code or text} ({how})")
+    if callable_url(url):
+        # A GET: the check's only write is the --submit POST, made with your token.
+        code, _, text = probe(c, "GET", url + "/jobs/sc-job-check", token=False)
+        if code in (401, 403):
+            add("auth", True, f"no token → {code}")
+        elif 200 <= code < 300:
+            add("auth", False, f"no token → {code}: it answers without one")
+        else:
+            add("auth", CANT_TELL, f"no token → {code or text}: can't tell")
+
+    compute = kind in COMPUTE or (kind is None and leased)
+    if compute:
+        add("own id", *own_id(c, s, sid, rows))
+    elif leased:
+        add("own id", False, f"declared {kind} but has {len(rows)} lease{'s' * (len(rows) != 1)}", critical=False)
+
+    if kind == "compute-job":
+        if submit and callable_url(url):
+            out.append(submit_probe(c, url, submit, True))
+        else:
+            add("submit", CANT_TELL, "not probed: run with --submit <its submit path>")
+        add("grant", CANT_TELL, "results to the caller's grant can't be seen from outside: its guide should say")
+    elif submit and callable_url(url):
+        out.append(submit_probe(c, url, submit, False))
+
+    add("description", len(desc) >= 40, f"{len(desc)} characters" + ("" if len(desc) >= 40 else ": too short to act on"), False)
+    words = [x for x in caps if x not in KINDS]
+    add("capabilities", words, ", ".join(words)[:120] if words else "none besides the kind", False)
+    v = s.get("version")
+    if isinstance(v, str) and v.strip():        # doc 793: any value for now; <semver>+<sha> later
+        add("version", True, f"{v!r}" + ("" if VERSION_RE.fullmatch(v) else " (later: <semver>+<sha>)"), False)
+    else:
+        add("version", False, "none", False)
+    age = s.get("health_age_s") if "health_age_s" in s else health_age(s.get("last_health"))
+    if not isinstance(age, int) or isinstance(age, bool):
+        age = None
+    if s.get("status") == "stale" or (age is not None and age > FRESH_S):
+        ago = "?" if age is None else f"{age // 60} min" if age < 7200 else f"{age // 3600} h"
+        add("health", False, f"stale: last report {ago} ago", False)
+    elif age is None:
+        add("health", False, "never reported (POST /services/{id}/health)", False)
+    else:
+        add("health", True, f"reported {age} s ago", False)
+    return out
+
+
+def _checked(c, s, submit):
+    try:
+        return check_service(c, s, submit)
+    except (Stopped, KeyboardInterrupt):
+        raise
+    except Exception as e:                      # one odd entry costs its own line, not the report
+        return [("entry", False, f"couldn't be checked: {e.__class__.__name__}: {clean(e, 120)}", True)]
+
+
+def cmd_check(c, a):
+    rows = c.call("GET", f"{c.api}/services")
+    by_id = {s["id"]: s for s in rows if isinstance(s, dict) and isinstance(s.get("id"), str)}
+    ids = sorted(by_id) if a.all else a.services
+    if not ids:
+        die("name a service id, or --all")
+    if a.submit and len(ids) != 1:
+        die("--submit goes with one service")
+    missing = [i for i in ids if i not in by_id]
+    if missing:
+        die(f"not in GET /services for you: {', '.join(clean(m, 80) for m in missing)}")
+    submit = safe_path(a.submit, "submit path") if a.submit else None
+    for sid in ids:                             # your token may go to these, and only these, origins
+        if callable_url(_text(by_id[sid], "external_url")):
+            c.allowed.add(origin(by_id[sid]["external_url"]))
+    if a.all:
+        try:
+            if c.call("GET", f"{c.api}/auth/verify").get("role") == "admin":
+                note(f"{PROG}: you're checking as admin. Where a guide needs a token, yours goes to that service. "
+                     "A plain seat is the caller the standard is for.")
+        except CallError:
+            pass
+    if len(ids) == 1:
+        results = {ids[0]: _checked(c, by_id[ids[0]], submit)}
+    else:
+        import concurrent.futures as cf
+        with cf.ThreadPoolExecutor(PARALLEL) as pool:
+            futures = {sid: pool.submit(_checked, c, by_id[sid], None) for sid in ids}
+            results = {sid: f.result() for sid, f in futures.items()}
+    report, failed = {}, False
+    for sid in ids:
+        lines = results[sid]
+        report[sid] = [{"check": n, "pass": ok, "why": w, "critical": crit} for n, ok, w, crit in lines]
+        failed |= any(ok is False and crit for _, ok, _, crit in lines)
+        if not a.json:
+            crits = [ok for _, ok, _, crit in lines if crit and ok is not None]
+            notes = sum(ok is False and not crit for _, ok, _, crit in lines)
+            print(f"{clean(sid, 120)}  ({sum(crits)}/{len(crits)})" + (f", {notes} note{'s' * (notes != 1)}" if notes else ""))
+            for n, ok, w, crit in lines:
+                state = "PASS" if ok else " ?  " if ok is None else "FAIL" if crit else "note"
+                print(f"  {state}  {n:<12} {clean(w, 200)}")
+    if a.json:
+        print(json.dumps(report, indent=1))
+    return 1 if failed else 0
+
+
 # The first signal starts the way out and later ones are ignored, so a second one can't cut its
 # note or its revoke short. A stop after a Ctrl-C is remembered: interrupted_note revokes for it.
 _SIGNALS = {"first": None, "stop": None}
@@ -773,6 +1155,11 @@ def main():
     p.add_argument("--no-wait", action="store_true", help="submit, print the job id and return")
     p.add_argument("--json", action="store_true", help="print the final job as JSON instead of a summary")
     f = sub.add_parser("fetch", help="wait for a job you submitted, then download it")
+    k = sub.add_parser("check", help="does a service meet the standard? one line per check; only a critical FAIL fails it")
+    k.add_argument("services", nargs="*", metavar="service", help="service ids, as in GET /services")
+    k.add_argument("--all", action="store_true", help="every service you can see")
+    k.add_argument("--submit", metavar="PATH", help="also probe the submit path with an empty body")
+    k.add_argument("--json", action="store_true", help="the report as JSON")
     for name, h in (("status", "a job's state, as raw JSON"), ("cancel", "withdraw or delete a job")):
         q = sub.add_parser(name, help=h)
         q.add_argument("service")
@@ -795,6 +1182,8 @@ def main():
         return cmd_call(c, a)
     if a.cmd == "fetch":
         return cmd_fetch(c, a)
+    if a.cmd == "check":
+        return cmd_check(c, a)
     base = service_base(c, a.service)
     poll = safe_path(a.poll, "poll path") if a.poll else f"/jobs/{job_id(a.job)}"
     print(json.dumps(c.call("GET" if a.cmd == "status" else "DELETE", base + poll), indent=1))
