@@ -1,0 +1,62 @@
+# The reference services on lagoon, beside the plane and walled off from it (claude-producer, task 1472).
+#
+#   cd ~/samcloud/examples/echo-services && docker compose -p samcloud-test-echo up -d
+#
+# Each runs as an unprivileged uid with no host account, on a read-only root, with no capabilities,
+# on its own network, under memory, CPU and process limits. The only mounts are its own script,
+# its guide and its token header file, all read-only: nothing else in this directory, and none of
+# the plane's volumes, database or secrets. It reaches the plane the way any caller does, at its
+# public address. On `docker compose down` it has stop_grace_period to give its lease back.
+
+x-fixture: &fixture
+  image: python:3.13-alpine@sha256:9ef1a599f863231c3d91e941389bfdc4a2d6070557243d54df1a4e57015b960e
+  user: "64100:64100"
+  read_only: true
+  cap_drop: [ALL]
+  security_opt: ["no-new-privileges:true"]
+  mem_limit: 128m
+  memswap_limit: 128m
+  cpus: 0.25
+  pids_limit: 128
+  restart: unless-stopped
+  stop_grace_period: 20s
+  networks: [fixtures]
+  logging:
+    driver: json-file
+    options: {max-size: "1m", max-file: "3"}
+  environment: &env
+    SAMCLOUD_API: https://cloud.samtg.xyz/api/v1
+    SERVICE_HDR: /run/token.hdr
+    HOST: 0.0.0.0
+    PYTHONDONTWRITEBYTECODE: "1"
+
+services:
+  test-echo-job:
+    <<: *fixture
+    command: ["python3", "-I", "/srv/echo_job.py"]
+    environment:
+      <<: *env
+      SERVICE_ID: lagoon/test-echo-job
+      LEASE_RESOURCE: lagoon/test-slot
+      PORT: "8811"
+    ports: ["${LAN_IP:-192.168.1.31}:8811:8811"]
+    volumes:
+      - ./echo_job.py:/srv/echo_job.py:ro
+      - ./guide-echo-job.md:/srv/guide-echo-job.md:ro
+      - ${TOKENS:-/etc/samcloud-test-echo}/test-echo-job.hdr:/run/token.hdr:ro
+
+  test-echo-api:
+    <<: *fixture
+    command: ["python3", "-I", "/srv/echo_api.py"]
+    environment:
+      <<: *env
+      SERVICE_ID: lagoon/test-echo-api
+      PORT: "8812"
+    ports: ["${LAN_IP:-192.168.1.31}:8812:8812"]
+    volumes:
+      - ./echo_api.py:/srv/echo_api.py:ro
+      - ./guide-echo-api.md:/srv/guide-echo-api.md:ro
+      - ${TOKENS:-/etc/samcloud-test-echo}/test-echo-api.hdr:/run/token.hdr:ro
+
+networks:
+  fixtures: {}
