@@ -1,4 +1,4 @@
-<!-- SKILL_VERSION: 3.25.0 -->
+<!-- SKILL_VERSION: 3.25.1 -->
 # tools — the API, the write tool, the helpers, the machines
 
 ## The API
@@ -407,6 +407,8 @@ POST   /services/{id}/health      with the service token: marks it online
 PATCH  /services/{id}             port, description, health_endpoint, docs_endpoint, version, capabilities
 DELETE /services/{id}             the service, its route, its DNS record and its token
 ```
+
+If a service has a working route but its discovery entry lacks an address, find its route id in `GET /routes`. A service manager can send `{"existing_route_id": <id>}` to `PATCH /services/{id}`. Read back `external_url` from the service entry and check its caller guide.
 
 **The standard: what a service owes its callers** (doc 793). Declare your kind with one capability word. What's critical depends on it; everything else is a note that never blocks. `sc-job check <service>` reads both and names each gap.
 

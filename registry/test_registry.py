@@ -341,6 +341,18 @@ class TestServiceRegistration:
         assert image["docs_endpoint"] == change["docs_endpoint"]
         assert client.get("/api/v1/services/d1/image").json()["external_url"] == image["external_url"]
 
+    def test_publishing_route_preserves_existing_address(self, client):
+        _register_device(client, "d1", "host1", ip="192.0.2.50")
+        first = _register_service(client, "image", "d1", 8811, subdomain="first")
+        assert first.status_code == 200
+        assert client.post("/api/v1/routes", json={
+            "subdomain": "second", "target": "localhost:8811", "service_id": "d1/image"
+        }).status_code == 200
+        route = next(r for r in client.get("/api/v1/routes").json() if r["subdomain"] == "second")
+        update = client.patch("/api/v1/services/d1/image", json={"existing_route_id": route["id"]})
+        assert update.status_code == 409
+        assert client.get("/api/v1/services/d1/image").json()["external_url"] == first.json()["external_url"]
+
     def test_list_services_empty(self, client):
         r = client.get("/api/v1/services")
         assert r.status_code == 200
