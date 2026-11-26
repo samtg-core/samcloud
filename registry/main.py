@@ -26,6 +26,7 @@ from zoneinfo import ZoneInfo
 
 from fastapi import (FastAPI, File, Form, HTTPException, Header, Request, Response,
                      UploadFile)
+from fastapi.concurrency import run_in_threadpool
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, PlainTextResponse, StreamingResponse
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
@@ -12945,31 +12946,55 @@ def _lease_with_position(lease: dict) -> dict:
 
 
 LEASE_WAIT_MAX_S = 120
+# A wait used to hold one of the request threads (anyio's 40) for its whole timeout, so
+# about 40 waits from any token holder stalled every other route (claude-producer, task
+# 1472). It now sleeps on the event loop and borrows a thread only to look, once a
+# second. A caller holds at most LEASE_WAIT_PER_CALLER waits at once and the plane
+# LEASE_WAIT_TOTAL, which bounds those looks; beyond is 429.
+LEASE_WAIT_PER_CALLER = int(os.environ.get("LEASE_WAIT_PER_CALLER", "8"))
+LEASE_WAIT_TOTAL = int(os.environ.get("LEASE_WAIT_TOTAL", "64"))
+_lease_waits: dict = {}     # owner_id -> open waits; touched only on the event loop
+
+
+def _lease_wait_look(lease_id, auth, checked):
+    _expire_stale_leases()
+    lease = db.query_one("SELECT * FROM leases WHERE id = ?", (lease_id,))
+    if not lease:
+        raise HTTPException(404, f"Lease {lease_id} not found")
+    if not checked:
+        _require_visible_resource(auth, lease["resource_id"])
+    return lease
 
 
 @app.get("/api/v1/leases/{lease_id}/wait")
-def wait_for_lease(lease_id: str, timeout_s: int = 30, auth: AuthContext = Depends(get_auth)):
+async def wait_for_lease(lease_id: str, timeout_s: int = 30, auth: AuthContext = Depends(get_auth)):
     """Long-poll a queued lease: answers when it leaves the queue (granted,
     expired, released) or after `timeout_s` (at most 120), with the row as it
     is then. A shell client blocks on this instead of hammering the resource;
     a service that already reconciles against the resource needs nothing new.
-    Each call occupies one request worker for its duration, so it is sized for
-    a few waiters per host, not a fleet of pollers (0.12.98)."""
-    deadline = time.monotonic() + max(0, min(int(timeout_s), LEASE_WAIT_MAX_S))
-    checked = False
-    while True:
-        _expire_stale_leases()
-        lease = db.query_one("SELECT * FROM leases WHERE id = ?", (lease_id,))
-        if not lease:
-            raise HTTPException(404, f"Lease {lease_id} not found")
-        if not checked:
-            _require_visible_resource(auth, lease["resource_id"])
+    A caller holds at most LEASE_WAIT_PER_CALLER of these at once (8), and the
+    plane LEASE_WAIT_TOTAL (64): beyond either is 429 with Retry-After."""
+    me = auth.owner_id
+    if _lease_waits.get(me, 0) >= LEASE_WAIT_PER_CALLER or sum(_lease_waits.values()) >= LEASE_WAIT_TOTAL:
+        raise HTTPException(429, f"Too many lease waits open: at most {LEASE_WAIT_PER_CALLER} per caller "
+                                 f"and {LEASE_WAIT_TOTAL} in all. Wait on one lease at a time, or poll "
+                                 f"GET /leases/{{id}}", headers={"Retry-After": "5"})
+    _lease_waits[me] = _lease_waits.get(me, 0) + 1
+    try:
+        deadline = time.monotonic() + max(0, min(int(timeout_s), LEASE_WAIT_MAX_S))
+        checked = False
+        while True:
+            lease = await run_in_threadpool(_lease_wait_look, lease_id, auth, checked)
             checked = True
-        if lease.get("status") != "queued" or time.monotonic() >= deadline:
-            out = _lease_with_position(lease)
-            out["waiting"] = lease.get("status") == "queued"
-            return out
-        time.sleep(1)
+            if lease.get("status") != "queued" or time.monotonic() >= deadline:
+                out = await run_in_threadpool(_lease_with_position, lease)
+                out["waiting"] = lease.get("status") == "queued"
+                return out
+            await asyncio.sleep(1)
+    finally:
+        _lease_waits[me] -= 1
+        if not _lease_waits[me]:
+            del _lease_waits[me]
 
 
 @app.get("/api/v1/leases")
