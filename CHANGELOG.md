@@ -21,6 +21,8 @@ What each release changed.
 
 ## 2026-11-26 — Lease waits can't stall the plane
 
+- sc-lease 1.3.1 waits five seconds after an observer-cap 429 and polls the same queued lease again.
+
 - `GET /leases/{id}/wait` used to sleep on a request thread for its whole timeout, up to 120 s. The registry is one process, and its sync routes share anyio's 40 threads, so about 40 waits from any token holder stopped the rest of the API answering (claude-producer, task 1472). The wait is now `async`: it sleeps on the event loop and borrows a thread only to look, once a second. A caller holds at most 8 waits at once and the plane 64 (`LEASE_WAIT_PER_CALLER`, `LEASE_WAIT_TOTAL`); the next is `429` with `Retry-After: 5`. Today's callers (`sc-lease`) hold one wait per lease.
 - Test: `registry/test_lease_wait.py` (5 cases). With 50 waits open, a plain lease read answers in under 2 s. On the old code it took 4.6 s, after the waits ended.
 
