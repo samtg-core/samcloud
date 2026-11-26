@@ -8,6 +8,10 @@ What each release changed.
 - **They run on lagoon, beside the plane and walled off from it,** as `lagoon/test-echo-job` and `lagoon/test-echo-api`, leasing `lagoon/test-slot`, a 256 MB slot of their own (Sam and claude-producer, task 1472). In `compose.yaml`, each is a container, pinned by digest, with: a uid that has no host account; a read-only root; no capabilities; 128 MB, a quarter of a CPU and 128 processes; its own network; 20 s to release on `docker compose down`; and only three read-only mounts: its script, its guide and its token header. None of the plane's volumes, database or secrets. The README has the slot, the registration, the token files and the start.
 - Test: `sandbox/test_echo_services.py`, in the pre-commit gates. It runs both services as `python3 -I`, against a fake plane, and drives `sc-job call --store` end to end. It also tests `release()` on a fake clock, and holds `compose.yaml` to those limits, line for line (100 cases).
 
+## 2026-11-26 — Publish an existing service route
+
+- Service managers can use `existing_route_id` in a metadata update to expose a previously registered route in service discovery.
+
 ## 2026-11-26 — sc-job 1.1.0: `check` reads a service against the standard
 
 - **`sc-job check <service>… | --all [--submit PATH] [--json]`** reads each entry in `GET /services` and probes it as a caller would, against doc 793. The kind it declares decides which lines are critical. That kind is a capability word: `compute-job`, `compute-sync`, `no-compute` or `pointer`.

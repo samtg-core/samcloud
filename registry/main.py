@@ -222,7 +222,7 @@ def _verify_route(external_url: str, health_endpoint: str = None, timeout: int =
 
 
 def _validate_subdomain(subdomain: str):
-    if not subdomain or not _SUBDOMAIN_RE.match(subdomain):
+    if not subdomain or not _SUBDOMAIN_RE.fullmatch(subdomain):
         raise HTTPException(400,
             f"Invalid subdomain '{subdomain}'. Must be 1-63 lowercase alphanumeric + hyphens.")
 
@@ -2524,6 +2524,7 @@ def put_service_not_allowed(service_id: str):
 
 
 class ServiceUpdate(StrictModel):
+    existing_route_id: Optional[int] = None
     port: Optional[int] = None
     health_endpoint: Optional[str] = None
     docs_endpoint: Optional[str] = None
@@ -2544,6 +2545,19 @@ def update_service(service_id: str, req: ServiceUpdate, auth: AuthContext = Depe
             f"Invalid status '{req.status}'. Must be one of: {', '.join(sorted(VALID_SERVICE_STATUSES))}")
 
     updates = {}
+    if req.existing_route_id is not None:
+        route = db.query_one("SELECT * FROM routes WHERE id = ? AND service_id = ?",
+                             (req.existing_route_id, service_id))
+        if not route:
+            raise HTTPException(404, "No such route belongs to this service")
+        subdomain = route["subdomain"]
+        _validate_subdomain(subdomain)
+        domain = _canonical_service_domain(route["domain"], admin=auth.is_admin())
+        url = _external_url(subdomain, domain)
+        if svc.get("external_url") and svc["external_url"] != url:
+            raise HTTPException(409, "Service already advertises another route")
+        _dns_preflight(subdomain, domain, admin=auth.is_admin())
+        updates.update(subdomain=subdomain, domain=domain, external_url=url)
     if req.port is not None: updates["port"] = req.port
     if req.health_endpoint is not None: updates["health_endpoint"] = req.health_endpoint
     if req.docs_endpoint is not None: updates["docs_endpoint"] = req.docs_endpoint
@@ -2560,7 +2574,17 @@ def update_service(service_id: str, req: ServiceUpdate, auth: AuthContext = Depe
     set_clause = ", ".join(f"{k} = ?" for k in updates)
     values = list(updates.values()) + [service_id]
 
-    db.execute(f"UPDATE services SET {set_clause} WHERE id = ?", tuple(values))
+    if req.existing_route_id is None:
+        db.execute(f"UPDATE services SET {set_clause} WHERE id = ?", tuple(values))
+    else:
+        with db.transaction() as conn:
+            changed = conn.execute(
+                f"UPDATE services SET {set_clause} WHERE id = ? AND (external_url IS NULL OR external_url = ?) "
+                "AND EXISTS (SELECT 1 FROM routes WHERE id = ? AND service_id = services.id "
+                "AND subdomain = ? AND lower(domain) = ?)",
+                (*values, url, req.existing_route_id, subdomain, domain))
+            if changed.rowcount != 1:
+                raise HTTPException(409, "Service address or route changed during update")
     db.audit(f"token:{auth.owner_id}", "service.updated", service_id, updates)
 
     return db.query_one("SELECT * FROM services WHERE id = ?", (service_id,))

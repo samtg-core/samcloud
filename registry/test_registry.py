@@ -321,6 +321,26 @@ class TestServiceRegistration:
                                   subdomain="mytest", domain="example.org")
         assert r.json()["external_url"] == "https://mytest.example.org"
 
+    def test_publish_existing_route_in_service_discovery(self, client, monkeypatch):
+        import main
+        monkeypatch.setattr(main, "_dns_module_on", lambda: False)
+        _register_device(client, "d1", "host1")
+        for name, port in (("image", 8811), ("other", 8812)):
+            assert _register_service(client, name, "d1", port).status_code == 200
+        assert client.post("/api/v1/routes", json={
+            "subdomain": "images", "target": "localhost:8811", "service_id": "d1/image"
+        }).status_code == 200
+        route = next(r for r in client.get("/api/v1/routes").json() if r["service_id"] == "d1/image")
+        change = {"existing_route_id": route["id"], "docs_endpoint": "/api/v1/docs/799"}
+        assert client.patch("/api/v1/services/d1/other", json=change).status_code == 404
+        for _ in range(2):
+            assert client.patch("/api/v1/services/d1/image", json=change).status_code == 200
+        rows = client.get("/api/v1/services").json()
+        image = next(r for r in rows if r["id"] == "d1/image")
+        assert image["external_url"] == main._external_url("images", route["domain"])
+        assert image["docs_endpoint"] == change["docs_endpoint"]
+        assert client.get("/api/v1/services/d1/image").json()["external_url"] == image["external_url"]
+
     def test_list_services_empty(self, client):
         r = client.get("/api/v1/services")
         assert r.status_code == 200

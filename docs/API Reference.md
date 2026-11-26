@@ -337,6 +337,8 @@ curl -s -X POST "${H[@]}" "$PLANE/enroll" -H 'Content-Type: application/json' \
 
 Service statuses: `online`, `offline`, `maintenance`, `degraded`, `active`, `pending`, `stopped`, `unknown`. [Services and Routes](Services%20and%20Routes.md) covers services, slots and routes.
 
+A manager can publish an existing route in discovery with `PATCH /api/v1/services/{service_id}` and `{"existing_route_id": 53}`. The route must already belong to that service. The registry derives the public URL from the route and accepts repeated requests for the same address. A conflicting advertised address returns 409.
+
 ### GET /api/v1/services/{service_id}
 
 ```bash
